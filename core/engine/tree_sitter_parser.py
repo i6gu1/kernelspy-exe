@@ -339,7 +339,7 @@ class TreeSitterParser:
             results.extend(self.find_string_concatenation(child))
         return results
 
-    def get安全保障分析(self, root: TSNode) -> Dict:
+    def get_security_analysis(self, root: TSNode) -> Dict:
         """Extract security-relevant information from CST."""
         return {
             'functions': len(self.find_function_definitions(root)),

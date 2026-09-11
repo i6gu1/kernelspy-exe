@@ -64,9 +64,8 @@ Be concise, accurate, and focus on actionable security findings."""
     def available(self) -> bool:
         return bool(self.config.google_api_key)
 
-    def analyze_code(self, code: str, language: str = "",
-                     context: str = "") -> AIResponse:
-        """Analyze code for vulnerabilities using Gemini."""
+    def _make_request(self, payload: dict) -> AIResponse:
+        """Make a request to the Google AI Studio API."""
         if not self.available:
             return AIResponse(
                 success=False,
@@ -77,36 +76,6 @@ Be concise, accurate, and focus on actionable security findings."""
         try:
             import urllib.request
             import urllib.error
-
-            prompt = f"""Analyze the following {language} code for security vulnerabilities.
-
-{f'Context: {context}' if context else ''}
-
-Code to analyze:
-```{language}
-{code[:8000]}
-```
-
-Provide:
-1. List of vulnerabilities found (with line numbers if possible)
-2. Severity rating for each
-3. Specific fix suggestions with code examples
-4. Overall security assessment"""
-
-            messages = [
-                {"role": "user", "parts": [{"text": prompt}]}
-            ]
-
-            payload = {
-                "contents": messages,
-                "systemInstruction": {
-                    "parts": [{"text": self.SYSTEM_PROMPT}]
-                },
-                "generationConfig": {
-                    "temperature": self.config.temperature,
-                    "maxOutputTokens": self.config.max_tokens,
-                }
-            }
 
             url = self.API_URL.format(
                 model=self.config.google_model,
@@ -158,6 +127,39 @@ Provide:
                 provider="google"
             )
 
+    def analyze_code(self, code: str, language: str = "",
+                     context: str = "") -> AIResponse:
+        """Analyze code for vulnerabilities using Gemini."""
+        prompt = f"""Analyze the following {language} code for security vulnerabilities.
+
+{f'Context: {context}' if context else ''}
+
+Code to analyze:
+```{language}
+{code[:8000]}
+```
+
+Provide:
+1. List of vulnerabilities found (with line numbers if possible)
+2. Severity rating for each
+3. Specific fix suggestions with code examples
+4. Overall security assessment"""
+
+        payload = {
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt}]}
+            ],
+            "systemInstruction": {
+                "parts": [{"text": self.SYSTEM_PROMPT}]
+            },
+            "generationConfig": {
+                "temperature": self.config.temperature,
+                "maxOutputTokens": self.config.max_tokens,
+            }
+        }
+
+        return self._make_request(payload)
+
     def chat(self, messages: List[ChatMessage]) -> AIResponse:
         """Chat with Gemini about code security."""
         if not self.available:
@@ -167,70 +169,31 @@ Provide:
                 provider="google"
             )
 
-        try:
-            import urllib.request
-            import urllib.error
+        contents = []
+        for msg in messages:
+            if msg.role == "system":
+                continue
+            contents.append({
+                "role": "model" if msg.role == "assistant" else "user",
+                "parts": [{"text": msg.content}]
+            })
 
-            contents = []
-            for msg in messages:
-                if msg.role == "system":
-                    continue
-                contents.append({
-                    "role": "model" if msg.role == "assistant" else "user",
-                    "parts": [{"text": msg.content}]
-                })
+        system_msg = next((m for m in messages if m.role == "system"), None)
 
-            system_msg = next((m for m in messages if m.role == "system"), None)
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": self.config.temperature,
+                "maxOutputTokens": self.config.max_tokens,
+            }
+        }
 
-            payload = {
-                "contents": contents,
-                "generationConfig": {
-                    "temperature": self.config.temperature,
-                    "maxOutputTokens": self.config.max_tokens,
-                }
+        if system_msg:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_msg.content}]
             }
 
-            if system_msg:
-                payload["systemInstruction"] = {
-                    "parts": [{"text": system_msg.content}]
-                }
-
-            url = self.API_URL.format(
-                model=self.config.google_model,
-                api_key=self.config.google_api_key
-            )
-
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-
-            content = ""
-            for candidate in data.get('candidates', []):
-                for part in candidate.get('content', {}).get('parts', []):
-                    content += part.get('text', '')
-
-            usage = data.get('usageMetadata', {})
-
-            return AIResponse(
-                success=True,
-                content=content,
-                provider="google",
-                model=self.config.google_model,
-                tokens_used=usage.get('totalTokenCount', 0),
-            )
-
-        except Exception as e:
-            return AIResponse(
-                success=False,
-                error=str(e),
-                provider="google"
-            )
+        return self._make_request(payload)
 
 
 class GGUFAnalyzer:

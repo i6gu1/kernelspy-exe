@@ -6,7 +6,7 @@ import json
 import webbrowser
 from pathlib import Path
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, Menu
 from core import Scanner, Finding, export_csv, export_html, export_json, export_sarif
 from core.engine.ai_analyzer import AIConfig, ChatMessage
 from core.engine.tree_sitter_parser import is_tree_sitter_available
@@ -18,18 +18,19 @@ ctk.set_default_color_theme("dark-blue")
 
 ACCENT      = "#0ea5e9"
 ACCENT_DIM  = "#075985"
-BG_DARK     = "#050505"
-BG_CARD     = "#111111"
-BG_SIDEBAR  = "#020202"
-BG_HOVER    = "#1a1a1d"
-CLR_TEXT    = "#f8fafc"
+ACCENT_LIGHT = "#38bdf8"
+BG_DARK     = "#0a0a0f"
+BG_CARD     = "#12121a"
+BG_SIDEBAR  = "#06060a"
+BG_HOVER    = "#1a1a25"
+CLR_TEXT    = "#f1f5f9"
 CLR_TEXT2   = "#94a3b8"
-CLR_DANGER  = "#ff1744"
-CLR_WARNING = "#ff9100"
-CLR_MEDIUM  = "#e6c200"
-CLR_SUCCESS = "#00e676"
+CLR_DANGER  = "#f43f5e"
+CLR_WARNING = "#f97316"
+CLR_MEDIUM  = "#eab308"
+CLR_SUCCESS = "#22c55e"
 FOOTER_TEXT = "Programmed by The L house"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 LANGS = {
     "en": {
@@ -127,6 +128,9 @@ class App(ctk.CTk):
         self._build_sidebar()
         self._build_pages()
         self.show_page("home")
+        
+        # Enable copy/paste keyboard shortcuts
+        self._setup_copy_paste()
 
         if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
             target = sys.argv[1]
@@ -135,6 +139,93 @@ class App(ctk.CTk):
     def _resource_path(self, rel):
         base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(base, rel)
+
+    def _setup_copy_paste(self):
+        """Setup copy/paste keyboard shortcuts and context menus."""
+        # Global keyboard shortcuts
+        self.bind('<Control-c>', self._copy_selection)
+        self.bind('<Control-v>', self._paste_from_clipboard)
+        self.bind('<Control-a>', self._select_all)
+        self.bind('<Control-C>', self._copy_selection)
+        self.bind('<Control-V>', self._paste_from_clipboard)
+        self.bind('<Control-A>', self._select_all)
+
+    def _copy_selection(self, event=None):
+        """Copy selected text to clipboard."""
+        try:
+            widget = self.focus_get()
+            if widget:
+                if hasattr(widget, 'selection_present') and widget.selection_present():
+                    selected = widget.selection_get()
+                    self.clipboard_clear()
+                    self.clipboard_append(selected)
+                elif hasattr(widget, 'get'):
+                    # For CTkEntry, copy all text
+                    content = widget.get()
+                    if content:
+                        self.clipboard_clear()
+                        self.clipboard_append(content)
+        except Exception:
+            pass
+
+    def _paste_from_clipboard(self, event=None):
+        """Paste text from clipboard."""
+        try:
+            widget = self.focus_get()
+            if widget and hasattr(widget, 'insert'):
+                try:
+                    text = self.clipboard_get()
+                    if text:
+                        # If there's a selection, replace it
+                        if hasattr(widget, 'selection_present') and widget.selection_present():
+                            try:
+                                widget.delete("sel.first", "sel.last")
+                            except Exception:
+                                pass
+                        widget.insert("insert", text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _select_all(self, event=None):
+        """Select all text in focused widget."""
+        try:
+            widget = self.focus_get()
+            if widget:
+                if hasattr(widget, 'tag_add'):
+                    widget.tag_add("sel", "1.0", "end")
+                elif hasattr(widget, 'select_range'):
+                    widget.select_range(0, 'end')
+        except Exception:
+            pass
+
+    def _copy_results_to_clipboard(self):
+        """Copy all scan results to clipboard."""
+        if not self.results:
+            return
+        lines = []
+        for r in self.results:
+            lines.append(f"{r.file}:{r.line} | {r.severity} | {r.type} | {r.description}")
+        self.clipboard_clear()
+        self.clipboard_append('\n'.join(lines))
+
+    def _add_context_menu(self, widget):
+        """Add right-click context menu to a widget."""
+        menu = Menu(widget, tearoff=0)
+        menu.add_command(label="Copy", command=lambda: self._copy_selection())
+        menu.add_command(label="Paste", command=lambda: self._paste_from_clipboard())
+        menu.add_separator()
+        menu.add_command(label="Select All", command=lambda: self._select_all())
+        
+        def show_menu(event):
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        
+        widget.bind('<Button-3>', show_menu)
+        widget.bind('<Button-2>', show_menu)
 
     def _settings_path(self):
         return os.path.join(Path.home(), ".kernelspy_settings.json")
@@ -458,6 +549,17 @@ class App(ctk.CTk):
             val.pack(anchor="w")
             self.res_vals[key] = val
 
+        btn_row = ctk.CTkFrame(pg, fg_color="transparent")
+        btn_row.pack(fill="x", padx=40, pady=(5, 5))
+        
+        ctk.CTkButton(
+            btn_row, text="Copy Results", font=ctk.CTkFont(size=12, weight="bold"),
+            width=140, height=36, corner_radius=8,
+            fg_color=BG_CARD, hover_color=BG_HOVER, text_color=CLR_TEXT,
+            border_width=1, border_color="#333",
+            command=self._copy_results_to_clipboard,
+        ).pack(side="right")
+
         self.res_tree = ctk.CTkFrame(pg, fg_color=BG_CARD, corner_radius=8)
         self.res_tree.pack(fill="both", expand=True, padx=40, pady=(0, 20))
 
@@ -556,6 +658,7 @@ class App(ctk.CTk):
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         if self.ai_config.google_api_key:
             self.api_key_entry.insert(0, self.ai_config.google_api_key)
+        self._add_context_menu(self.api_key_entry)
 
         ctk.CTkButton(api_row, text="Save", font=ctk.CTkFont(size=12, weight="bold"),
                        width=80, height=36, corner_radius=8,
@@ -631,6 +734,7 @@ class App(ctk.CTk):
                                           border_width=1, border_color="#333")
         self.chat_input.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.chat_input.insert("1.0", self.lang["chat_placeholder"])
+        self._add_context_menu(self.chat_input)
 
         btn_col = ctk.CTkFrame(input_row, fg_color="transparent")
         btn_col.pack(side="right")

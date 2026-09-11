@@ -5,6 +5,7 @@ fire. Complements the per-language analyzers; every check is structurally
 validated to keep the false-positive rate near zero.
 """
 
+import os
 import re
 from typing import Dict, List, Optional
 
@@ -18,6 +19,13 @@ CODE_EXTS = {
     '.rb', '.kt', '.swift', '.scala', '.c', '.cpp', '.h', '.hpp', '.lua',
     '.pl', '.pm', '.groovy', '.dart', '.rs',
 }
+
+# ── Paths that indicate test files (lower severity for findings in tests) ──
+_TEST_PATH_MARKERS = (
+    'test', 'tests', 'test_', '_test', 'spec', 'spec_', '_spec',
+    'mock', 'mocks', 'fixture', 'fixtures', 'conftest',
+    '__tests__', '__spec__', 'e2e', 'integration',
+)
 
 # ── SQL sink call shapes: name( followed by dynamic string construction ──
 _SQL_SINK = re.compile(
@@ -61,11 +69,33 @@ _HARDCODED_CRED = re.compile(
     r'(?i)\b' + _CRED_NAME + r'\b\s*(?:=|:|=>)\s*(["\'`])'
     r'([^\'`\n]{6,})\1')
 
+# ── Safe credential patterns (tests, examples, documentation) ──
+_SAFE_CRED_PATTERNS = (
+    'example', 'sample', 'demo', 'test', 'mock', 'fake',
+    'dummy', 'placeholder', 'template', 'tutorial', 'docs',
+)
+
 _FRAMEWORK_HINTS = (
     ('flask', 'flask'), ('django', 'django'), ('fastapi', 'fastapi'),
     ('express', 'express'), ('springframework', 'spring'),
     ('gin-gonic', 'gin'),
 )
+
+
+def _is_test_file(filepath: str) -> bool:
+    """Check if a file is likely a test file based on path markers."""
+    low = filepath.lower()
+    parts = low.replace('\\', '/').split('/')
+    for part in parts:
+        for marker in _TEST_PATH_MARKERS:
+            if marker in part:
+                return True
+    name = os.path.basename(low)
+    if name.startswith('test_') or name.endswith('_test.py') or name.endswith('_test.js'):
+        return True
+    if name.startswith('spec_') or name.endswith('.spec.js') or name.endswith('.spec.ts'):
+        return True
+    return False
 
 
 def detect_framework(content: str) -> Optional[str]:
@@ -87,6 +117,9 @@ class ContextAnalyzer:
         clean = strip_comments_and_strings(content, ext)
         clean_lines = clean.split('\n')
         raw_lines = content.split('\n')
+
+        # Detect if this is a test file (reduces severity for some findings)
+        is_test = _is_test_file(filepath)
 
         # ── 1. JNDI/Log4Shell payload anywhere in code or strings ──
         # Uses RAW lines: the payload lives inside string literals which
@@ -115,10 +148,11 @@ class ContextAnalyzer:
                     continue
                 arg_zone = line.split('(', 1)[1] if '(' in line else ''
                 if _DYNAMIC_ARGS.search(arg_zone):
+                    sev = "MEDIUM" if is_test else "CRITICAL"
                     findings.append(Finding(
                         file=filepath, line=i,
                         type="Context: SQL built from dynamic string",
-                        severity="CRITICAL",
+                        severity=sev,
                         snippet=line.strip()[:120],
                         description=(
                             "Database query assembled via concatenation or "
@@ -148,10 +182,11 @@ class ContextAnalyzer:
         for regex, ftype, sev, cat, desc in config_checks:
             for i, line in enumerate(raw_lines, 1):
                 if regex.search(line):
+                    actual_sev = "LOW" if is_test else sev
                     findings.append(Finding(
                         file=filepath, line=i,
                         type=f"Context: {ftype}",
-                        severity=sev, snippet=line.strip()[:120],
+                        severity=actual_sev, snippet=line.strip()[:120],
                         description=desc,
                         category=cat, analyzer="context",
                     ))
@@ -165,12 +200,17 @@ class ContextAnalyzer:
                 value = m.group(2).strip()
                 if is_placeholder_value(value):
                     continue
+                # Skip safe patterns in test/example files
+                if is_test:
+                    lower_val = value.lower()
+                    if any(pat in lower_val for pat in _SAFE_CRED_PATTERNS):
+                        continue
                 seen_lines.add(i)
                 name = re.sub(r'[^a-z]', '', m.group(1).lower()) or 'credential'
                 findings.append(Finding(
                     file=filepath, line=i,
                     type=f"Context: hardcoded {name}",
-                    severity="CRITICAL",
+                    severity="HIGH" if is_test else "CRITICAL",
                     snippet=re.sub(re.escape(m.group(2)), '*' * min(len(value), 12),
                                    line.strip())[:120],
                     description=(
