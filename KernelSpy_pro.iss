@@ -55,7 +55,7 @@ ChangesEnvironment=no
 UninstallLogMode=new
 
 OutputDir=installer
-OutputBaseFilename=KernelSpy_Scanner_Setup_PRO_{#MyAppVersion}
+OutputBaseFilename=KernelSpy_Scanner_Setup_PRO_{#MyAppVersion}_MultiLang
 Compression=lzma2/max
 SolidCompression=yes
 LZMANumBlockThreads=4
