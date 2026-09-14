@@ -13,7 +13,13 @@ from ..rules.secrets import SECRET_RULES
 from ..rules.language import LANGUAGE_RULES
 from ..rules.config import CONFIG_RULES, SUSPICIOUS_FILES
 from ..rules.dependencies import VULN_PACKAGES, DEP_FILES
-from ..analyzers import PythonAnalyzer, PHPAnalyzer, JSAnalyzer, JavaAnalyzer, GenericAnalyzer
+from ..analyzers import (
+    PythonAnalyzer, PHPAnalyzer, JSAnalyzer, JavaAnalyzer,
+    GoAnalyzer, CSharpAnalyzer, RubyAnalyzer, KotlinAnalyzer,
+    SwiftAnalyzer, ScalaAnalyzer, DartAnalyzer, RustAnalyzer,
+    CCppAnalyzer, LuaAnalyzer, PerlAnalyzer, GroovyAnalyzer,
+    GenericAnalyzer,
+)
 from ..engine.patterns import (
     CompiledRule, ContentContext, scan_content_for_rules, first_quoted_value,
 )
@@ -48,11 +54,10 @@ LANGUAGE_EXT_MAP = {
     '.js': 'javascript', '.ts': 'javascript', '.jsx': 'javascript', '.tsx': 'javascript',
     '.php': 'php',
     '.java': 'java',
-    # Languages with dedicated pattern rules handled by the generic engine.
-    '.go': 'generic', '.cs': 'generic', '.rb': 'generic', '.lua': 'generic',
-    '.pl': 'generic', '.pm': 'generic', '.kt': 'generic', '.swift': 'generic',
-    '.scala': 'generic', '.rs': 'generic', '.dart': 'generic', '.groovy': 'generic',
-    '.c': 'generic', '.cpp': 'generic', '.h': 'generic', '.hpp': 'generic',
+    '.go': 'go', '.cs': 'csharp', '.rb': 'ruby', '.lua': 'lua',
+    '.pl': 'perl', '.pm': 'perl', '.kt': 'kotlin', '.swift': 'swift',
+    '.scala': 'scala', '.rs': 'rust', '.dart': 'dart', '.groovy': 'groovy',
+    '.c': 'c_cpp', '.cpp': 'c_cpp', '.h': 'c_cpp', '.hpp': 'c_cpp',
 }
 
 
@@ -121,6 +126,18 @@ class Scanner:
         self._php_analyzer = PHPAnalyzer()
         self._js_analyzer = JSAnalyzer()
         self._java_analyzer = JavaAnalyzer()
+        self._go_analyzer = GoAnalyzer()
+        self._csharp_analyzer = CSharpAnalyzer()
+        self._ruby_analyzer = RubyAnalyzer()
+        self._kotlin_analyzer = KotlinAnalyzer()
+        self._swift_analyzer = SwiftAnalyzer()
+        self._scala_analyzer = ScalaAnalyzer()
+        self._dart_analyzer = DartAnalyzer()
+        self._rust_analyzer = RustAnalyzer()
+        self._c_cpp_analyzer = CCppAnalyzer()
+        self._lua_analyzer = LuaAnalyzer()
+        self._perl_analyzer = PerlAnalyzer()
+        self._groovy_analyzer = GroovyAnalyzer()
         self._generic_analyzer = GenericAnalyzer()
         self._context_analyzer = ContextAnalyzer()
         self._ts_parser = get_parser()
@@ -378,6 +395,18 @@ class Scanner:
             'php': self._php_analyzer,
             'javascript': self._js_analyzer,
             'java': self._java_analyzer,
+            'go': self._go_analyzer,
+            'csharp': self._csharp_analyzer,
+            'ruby': self._ruby_analyzer,
+            'kotlin': self._kotlin_analyzer,
+            'swift': self._swift_analyzer,
+            'scala': self._scala_analyzer,
+            'dart': self._dart_analyzer,
+            'rust': self._rust_analyzer,
+            'c_cpp': self._c_cpp_analyzer,
+            'lua': self._lua_analyzer,
+            'perl': self._perl_analyzer,
+            'groovy': self._groovy_analyzer,
             'generic': self._generic_analyzer,
         }.get(language, self._generic_analyzer)
 
