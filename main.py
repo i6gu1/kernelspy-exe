@@ -8,7 +8,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, Menu
 from core import Scanner, Finding, export_csv, export_html, export_json, export_sarif
-from core.engine.ai_analyzer import AIConfig, ChatMessage
+from core.engine.ai_analyzer import AIConfig, AIResponse, ChatMessage
 from core.engine.tree_sitter_parser import is_tree_sitter_available
 from core.engine.sast_orchestrator import get_sast_orchestrator
 
@@ -30,7 +30,7 @@ CLR_WARNING = "#f97316"
 CLR_MEDIUM  = "#eab308"
 CLR_SUCCESS = "#22c55e"
 FOOTER_TEXT = "Programmed by The L house"
-VERSION = "1.2.0"
+VERSION = "1.4.3"
 
 LANGS = {
     "en": {
@@ -54,6 +54,8 @@ LANGS = {
         "model_status": "Model Status", "model_loaded": "Loaded", "model_not_loaded": "Not Loaded",
         "chat_placeholder": "Ask about code security...", "send": "Send", "clear_chat": "Clear Chat",
         "analyze_findings": "Analyze Findings with AI", "ai_analyzing": "AI is analyzing...",
+        "ai_no_results": "Run a scan first.",
+        "ai_no_provider": "No AI provider - add a Google API key in the AI Chat page.",
         "ts_title": "Tree-sitter Multi-Language Parser", "ts_supported": "Supported Languages",
         "ts_available": "Tree-sitter Available", "ts_not_available": "Tree-sitter Not Available",
         "sast_engines": "SAST Engines", "semgrep": "Semgrep", "trivy": "Trivy", "sonar": "SonarScanner",
@@ -86,6 +88,8 @@ LANGS = {
         "model_status": "حالة النموذج", "model_loaded": "تم التحميل", "model_not_loaded": "غير محمل",
         "chat_placeholder": "اسأل عن أمان الكود...", "send": "إرسال", "clear_chat": "مسح المحادثة",
         "analyze_findings": "تحليل النتائج بالذكاء الاصطناعي", "ai_analyzing": "الذكاء الاصطناعي يحلل...",
+        "ai_no_results": "شغّل فحصاً أولاً.",
+        "ai_no_provider": "لا يوجد مزود ذكاء اصطناعي - أضف مفتاح Google API في صفحة المحادثة الذكية.",
         "ts_title": "محلل شجرة القواعد الموحدة", "ts_supported": "اللغات المدعومة",
         "ts_available": "شجرة القواعد متاحة", "ts_not_available": "شجرة القواعد غير متاحة",
         "sast_engines": "محركات الفحص", "semgrep": "Semgrep", "trivy": "Trivy", "sonar": "SonarScanner",
@@ -210,6 +214,92 @@ class App(ctk.CTk):
         self.clipboard_clear()
         self.clipboard_append('\n'.join(lines))
 
+    # ───────────── AI: ANALYZE FINDINGS (Results page) ─────────────
+    def _ai_analyze_results(self):
+        """Send the current scan findings to the AI provider (async)."""
+        if getattr(self, "scanning", False):
+            return
+        if not getattr(self, "results", None):
+            self.res_ai_status.configure(
+                text=self.lang.get("ai_no_results", "Run a scan first."),
+                text_color=CLR_WARNING)
+            return
+        if self._get_ai().active_provider == "none":
+            self.res_ai_status.configure(
+                text=self.lang.get("ai_no_provider",
+                                   "No AI provider - add a Google API key in the AI Chat page."),
+                text_color=CLR_DANGER)
+            return
+
+        self.ai_results_btn.configure(state="disabled")
+        self.res_ai_status.configure(
+            text=self.lang.get("ai_analyzing", "AI is analyzing..."),
+            text_color=CLR_WARNING)
+
+        findings = list(self.results)
+        threading.Thread(target=self._ai_analyze_results_thread,
+                         args=(findings,), daemon=True).start()
+
+    def _ai_analyze_results_thread(self, findings):
+        try:
+            response = self._get_ai().analyze_findings(findings)
+        except Exception as exc:          # never leave the button stuck
+            response = AIResponse(success=False, error=str(exc), provider="none")
+        self.after(0, lambda: self._show_ai_analysis(response))
+
+    def _show_ai_analysis(self, response):
+        self.ai_results_btn.configure(state="normal")
+        if not response.success:
+            self.res_ai_status.configure(text=(response.error or "")[:170],
+                                         text_color=CLR_DANGER)
+            return
+        self.res_ai_status.configure(text="", text_color=CLR_TEXT2)
+
+        win = ctk.CTkToplevel(self)
+        win.title(self.lang.get("analyze_findings", "Analyze Findings with AI"))
+        win.geometry("880x620")
+        win.configure(fg_color=BG_DARK)
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        header = ctk.CTkLabel(
+            win, text=self.lang.get("analyze_findings", "Analyze Findings with AI"),
+            font=ctk.CTkFont(size=17, weight="bold"), text_color=ACCENT)
+        header.pack(anchor="w", padx=18, pady=(16, 6))
+
+        meta = ctk.CTkLabel(
+            win, text=f"{response.provider} / {response.model}  -  "
+                      f"{response.tokens_used} tokens",
+            font=ctk.CTkFont(size=11), text_color=CLR_TEXT2)
+        meta.pack(anchor="w", padx=18, pady=(0, 8))
+
+        box = ctk.CTkTextbox(win, fg_color="#0a0a0a", text_color=CLR_TEXT,
+                             font=ctk.CTkFont(size=13), corner_radius=8,
+                             border_width=1, border_color="#333",
+                             wrap="word")
+        box.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        box.insert("1.0", response.content or "")
+        box.configure(state="disabled")
+
+        foot = ctk.CTkFrame(win, fg_color="transparent")
+        foot.pack(fill="x", padx=18, pady=(0, 16))
+
+        def _copy():
+            self.clipboard_clear()
+            self.clipboard_append(response.content or "")
+
+        ctk.CTkButton(foot, text="Copy", font=ctk.CTkFont(size=12, weight="bold"),
+                      width=110, height=34, corner_radius=8,
+                      fg_color=BG_CARD, hover_color=BG_HOVER, text_color=CLR_TEXT,
+                      border_width=1, border_color="#333",
+                      command=_copy).pack(side="left")
+        ctk.CTkButton(foot, text="Close", font=ctk.CTkFont(size=12, weight="bold"),
+                      width=110, height=34, corner_radius=8,
+                      fg_color=ACCENT, hover_color=ACCENT_DIM, text_color=BG_DARK,
+                      command=win.destroy).pack(side="right")
+
     def _add_context_menu(self, widget):
         """Add right-click context menu to a widget."""
         menu = Menu(widget, tearoff=0)
@@ -256,7 +346,13 @@ class App(ctk.CTk):
                 self.output_dir = data.get("output_dir", self.output_dir)
                 self.ai_config.provider = data.get("ai_provider", "google")
                 self.ai_config.google_api_key = data.get("google_api_key", "")
-                self.ai_config.google_model = data.get("google_model", "gemini-2.0-flash")
+                # Retired defaults from 1.2.x are upgraded automatically;
+                # if the model is unavailable the analyzer picks a working one.
+                _model = (data.get("google_model") or "").strip().split("/")[-1]
+                if _model in ("", "gemini-2.0-flash", "gemini-1.5-flash",
+                              "gemini-1.5-pro", "gemini-1.0-pro"):
+                    _model = "gemini-flash-latest"
+                self.ai_config.google_model = _model
                 self.ai_config.gguf_model_path = data.get("gguf_model_path", "")
                 self.ai_config.gguf_n_ctx = data.get("gguf_n_ctx", 4096)
                 self.ai_config.gguf_n_threads = data.get("gguf_n_threads", 4)
@@ -551,7 +647,21 @@ class App(ctk.CTk):
 
         btn_row = ctk.CTkFrame(pg, fg_color="transparent")
         btn_row.pack(fill="x", padx=40, pady=(5, 5))
-        
+
+        self.ai_results_btn = ctk.CTkButton(
+            btn_row, text=self.lang["analyze_findings"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=230, height=36, corner_radius=8,
+            fg_color=ACCENT, hover_color=ACCENT_DIM, text_color=BG_DARK,
+            command=self._ai_analyze_results,
+        )
+        self.ai_results_btn.pack(side="left")
+
+        self.res_ai_status = ctk.CTkLabel(btn_row, text="",
+                                          font=ctk.CTkFont(size=12),
+                                          text_color=CLR_TEXT2)
+        self.res_ai_status.pack(side="left", padx=(15, 0))
+
         ctk.CTkButton(
             btn_row, text="Copy Results", font=ctk.CTkFont(size=12, weight="bold"),
             width=140, height=36, corner_radius=8,
@@ -660,10 +770,46 @@ class App(ctk.CTk):
             self.api_key_entry.insert(0, self.ai_config.google_api_key)
         self._add_context_menu(self.api_key_entry)
 
+        ctk.CTkButton(api_row, text="Test", font=ctk.CTkFont(size=12, weight="bold"),
+                       width=80, height=36, corner_radius=8,
+                       fg_color=BG_CARD, hover_color=BG_HOVER, text_color=CLR_TEXT,
+                       border_width=1, border_color="#333",
+                       command=self._test_api_key).pack(side="right", padx=(0, 8))
+
         ctk.CTkButton(api_row, text="Save", font=ctk.CTkFont(size=12, weight="bold"),
                        width=80, height=36, corner_radius=8,
                        fg_color=ACCENT, hover_color=ACCENT_DIM, text_color=BG_DARK,
                        command=self._save_api_key).pack(side="right")
+
+        # Model selector - every generateContent model this key can use
+        model_row = ctk.CTkFrame(self.google_frame, fg_color="transparent")
+        model_row.pack(fill="x", padx=15, pady=(0, 4))
+
+        ctk.CTkLabel(model_row, text="Model:", font=ctk.CTkFont(size=12, weight="bold"),
+                      text_color=CLR_TEXT).pack(side="left", padx=(0, 10))
+
+        self.model_menu = ctk.CTkOptionMenu(
+            model_row, values=[self.ai_config.google_model],
+            font=ctk.CTkFont(size=12), width=300, height=32,
+            fg_color="#0a0a0a", button_color=BG_CARD, button_hover_color=BG_HOVER,
+            dropdown_fg_color=BG_CARD, text_color=CLR_TEXT,
+            command=self._on_model_change)
+        self.model_menu.set(self.ai_config.google_model)
+        self.model_menu.pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(model_row, text="Refresh models", font=ctk.CTkFont(size=11),
+                       width=120, height=32, corner_radius=8,
+                       fg_color=BG_CARD, hover_color=BG_HOVER, text_color=CLR_TEXT,
+                       border_width=1, border_color="#333",
+                       command=self._refresh_models).pack(side="left", padx=(0, 8))
+
+        self.model_status = ctk.CTkLabel(model_row, text="", font=ctk.CTkFont(size=11),
+                                         text_color=CLR_TEXT2)
+        self.model_status.pack(side="left")
+
+        self.api_status = ctk.CTkLabel(self.google_frame, text="",
+                                        font=ctk.CTkFont(size=12), height=18)
+        self.api_status.pack(anchor="w", padx=15, pady=(0, 8))
 
         # GGUF Model section
         self.gguf_frame = ctk.CTkFrame(pg, fg_color=BG_CARD, corner_radius=10)
@@ -715,6 +861,9 @@ class App(ctk.CTk):
 
         # Show/hide frames based on provider
         self._on_provider_change()
+
+        # Load the full model catalogue in the background (async, non-blocking)
+        self._refresh_models(silent=True)
 
         # Chat area
         self.chat_frame = ctk.CTkFrame(pg, fg_color=BG_CARD, corner_radius=10)
@@ -770,6 +919,141 @@ class App(ctk.CTk):
         from core.engine.ai_analyzer import get_ai_analyzer
         get_ai_analyzer().config = self.ai_config
         self._save_settings()
+        if hasattr(self, "api_status"):
+            self.api_status.configure(
+                text="Key saved." if key else "Key cleared.",
+                text_color=CLR_SUCCESS if key else CLR_TEXT2)
+
+    def _test_api_key(self):
+        """Save the key and verify it against the Google AI API (async)."""
+        key = self.api_key_entry.get().strip()
+        self.ai_config.google_api_key = key
+        from core.engine.ai_analyzer import get_ai_analyzer
+        ai = get_ai_analyzer()
+        ai.config = self.ai_config
+        self._save_settings()
+
+        if not key:
+            self.api_status.configure(text="Enter an API key first (or use the "
+                                           "built-in analyzers without AI).",
+                                      text_color=CLR_WARNING)
+            return
+
+        self.api_status.configure(text="Testing key...", text_color=CLR_WARNING)
+
+        def _run():
+            result = ai.test_connection()
+            def _show():
+                if result.success:
+                    # The analyzer may have auto-selected a working model;
+                    # persist it so the next launch uses it directly.
+                    self._save_settings()
+                    self._sync_model_widgets()
+                    self._refresh_models(silent=True)
+                    self.api_status.configure(
+                        text=f"Connected ({result.model}, "
+                             f"{result.tokens_used} tokens).",
+                        text_color=CLR_SUCCESS)
+                else:
+                    self.api_status.configure(text=result.error[:160],
+                                              text_color=CLR_DANGER)
+            self.after(0, _show)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ───────────── AI MODEL SELECTION ─────────────
+    def _on_model_change(self, value):
+        self._apply_model(value)
+
+    def _apply_model(self, value):
+        """Store the chosen model, push it to the analyzer and persist it."""
+        value = (value or "").strip()
+        if not value or value.startswith("Loading"):
+            return
+        self.ai_config.google_model = value
+        from core.engine.ai_analyzer import get_ai_analyzer
+        get_ai_analyzer().config = self.ai_config
+        self._save_settings()
+        self._sync_model_widgets()
+
+    def _sync_model_widgets(self):
+        """Keep every model dropdown in the app on the configured model."""
+        current = self.ai_config.google_model
+        for attr in ("model_menu", "settings_model_menu"):
+            menu = getattr(self, attr, None)
+            if menu is None:
+                continue
+            try:
+                values = list(menu.cget("values") or [])
+                if current not in values:
+                    values = [current] + values
+                    menu.configure(values=values)
+                menu.set(current)
+            except Exception:
+                pass
+
+    def _refresh_models(self, silent=False):
+        """Fetch every generateContent model the API key can use (async)."""
+        threading.Thread(target=self._models_worker, args=(silent,),
+                         daemon=True).start()
+
+    def _models_worker(self, silent=False):
+        from core.engine.ai_analyzer import get_ai_analyzer, MODEL_FALLBACKS
+        ai = get_ai_analyzer()
+        key = self.ai_config.google_api_key
+        try:
+            typed = self.api_key_entry.get().strip()
+            if typed != key:
+                key = typed
+                self.ai_config.google_api_key = typed
+                ai.config = self.ai_config
+                self._save_settings()
+        except Exception:
+            pass
+
+        models = ai.google.list_models() if key else list(MODEL_FALLBACKS)
+        blocked = bool(key) and ai.google.region_blocked
+        self.after(0, lambda: self._set_models(models, silent, blocked))
+
+    def _set_models(self, models, silent=False, region_blocked=False):
+        from core.engine.ai_analyzer import MODEL_FALLBACKS
+        models = list(models or [])
+        if not models:
+            models = list(MODEL_FALLBACKS)
+        current = self.ai_config.google_model
+        if current and current not in models:
+            models = [current] + models
+
+        for attr in ("model_menu", "settings_model_menu"):
+            menu = getattr(self, attr, None)
+            if menu is None:
+                continue
+            try:
+                menu.configure(values=models)
+                menu.set(current if current in models else models[0])
+            except Exception:
+                pass
+
+        if hasattr(self, "model_status"):
+            if region_blocked:
+                self.model_status.configure(
+                    text="Google AI is blocked in your region - use a VPN or "
+                         "a local GGUF model",
+                    text_color=CLR_DANGER)
+            else:
+                self.model_status.configure(
+                    text=f"{len(models)} models available",
+                    text_color=CLR_TEXT2)
+        if not silent and hasattr(self, "api_status"):
+            if region_blocked:
+                self.api_status.configure(
+                    text="Google AI is blocked in your region. Connect through "
+                         "a VPN, or load a local GGUF model.",
+                    text_color=CLR_DANGER)
+            else:
+                self.api_status.configure(
+                    text=f"Model list refreshed: {len(models)} available.",
+                    text_color=CLR_SUCCESS)
 
     def _browse_gguf_model(self):
         path = filedialog.askopenfilename(
@@ -848,6 +1132,9 @@ class App(ctk.CTk):
         try:
             ai = self._get_ai()
             response = ai.chat(text)
+            # A "model not found" reply auto-selects a working model; keep
+            # the dropdowns in the UI in sync with the analyzer.
+            self.after(0, self._sync_model_widgets)
             self.after(0, lambda: self._add_chat_message(
                 "assistant" if response.success else "error",
                 response.content if response.success else response.error
@@ -1030,6 +1317,28 @@ class App(ctk.CTk):
         self.settings_api_key.pack(side="left", fill="x", expand=True, padx=(0, 10))
         if self.ai_config.google_api_key:
             self.settings_api_key.insert(0, self.ai_config.google_api_key)
+
+        # Model selector (same list / same choice as the AI Chat page)
+        smodel_row = ctk.CTkFrame(ai_frame, fg_color="transparent")
+        smodel_row.pack(fill="x", padx=15, pady=5)
+
+        ctk.CTkLabel(smodel_row, text="Model:", font=ctk.CTkFont(size=12),
+                      text_color=CLR_TEXT2).pack(side="left", padx=(0, 10))
+
+        self.settings_model_menu = ctk.CTkOptionMenu(
+            smodel_row, values=[self.ai_config.google_model],
+            font=ctk.CTkFont(size=12), width=300, height=32,
+            fg_color="#0a0a0a", button_color=BG_CARD, button_hover_color=BG_HOVER,
+            dropdown_fg_color=BG_CARD, text_color=CLR_TEXT,
+            command=self._on_model_change)
+        self.settings_model_menu.set(self.ai_config.google_model)
+        self.settings_model_menu.pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(smodel_row, text="Refresh", font=ctk.CTkFont(size=11),
+                       width=90, height=32, corner_radius=8,
+                       fg_color=BG_CARD, hover_color=BG_HOVER, text_color=CLR_TEXT,
+                       border_width=1, border_color="#333",
+                       command=self._refresh_models).pack(side="left")
 
         # GGUF path
         gpath_row = ctk.CTkFrame(ai_frame, fg_color="transparent")

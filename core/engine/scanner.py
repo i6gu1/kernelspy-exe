@@ -29,6 +29,44 @@ from ..engine.tree_sitter_parser import get_parser, is_tree_sitter_available
 from ..engine.cpg import get_cpg_analyzer
 from ..engine.sast_orchestrator import get_sast_orchestrator
 from ..engine.ai_analyzer import get_ai_analyzer, AIConfig
+from ..engine.dedup import layer_findings
+from ..engine.filters import SourceLoader, apply_inline_suppressions, apply_scope_gates
+from ..engine.severity_matrix import (
+    apply_severity_matrix, apply_fatal_sink_policy,
+)
+from ..engine.remediation import attach as attach_remediation
+
+# Bandit test-id -> KernelSpy finding category, so an external report layers
+# with the native detector for the same bug instead of staying a separate
+# "BANDIT" record (dedup then merges file+line+category across analyzers).
+_BANDIT_CATEGORY = {
+    # code / command / SQL injection
+    'B102': 'INJECTION', 'B602': 'INJECTION', 'B603': 'INJECTION',
+    'B604': 'INJECTION', 'B605': 'INJECTION', 'B606': 'INJECTION',
+    'B607': 'INJECTION', 'B608': 'INJECTION', 'B609': 'INJECTION',
+    'B610': 'INJECTION', 'B611': 'INJECTION',
+    # template injection / XSS
+    'B701': 'XSS', 'B702': 'XSS', 'B703': 'XSS', 'B704': 'XSS',
+    # filesystem / path handling
+    'B108': 'TRAVERSAL', 'B202': 'TRAVERSAL',
+    # insecure deserialization
+    'B301': 'DESERIALIZATION', 'B302': 'DESERIALIZATION',
+    'B403': 'DESERIALIZATION', 'B405': 'DESERIALIZATION',
+    'B506': 'DESERIALIZATION', 'B614': 'DESERIALIZATION',
+    # weak crypto / TLS
+    'B303': 'CRYPTO', 'B324': 'CRYPTO', 'B501': 'CRYPTO',
+    'B502': 'CRYPTO', 'B503': 'CRYPTO', 'B504': 'CRYPTO',
+    'B505': 'CRYPTO', 'B507': 'CRYPTO', 'B508': 'CRYPTO',
+    'B509': 'CRYPTO', 'B601': 'CRYPTO',
+    # hardcoded credentials
+    'B105': 'AUTH', 'B106': 'AUTH', 'B107': 'AUTH',
+    # dangerous / lazy configuration
+    'B103': 'CONFIG', 'B104': 'CONFIG', 'B201': 'CONFIG',
+    'B612': 'CONFIG', 'B113': 'NETWORK', 'B615': 'NETWORK',
+    # hygiene
+    'B101': 'QUALITY', 'B110': 'QUALITY', 'B112': 'QUALITY',
+    'B404': 'QUALITY', 'B613': 'QUALITY',
+}
 
 EXCLUDED_DIRS = {
     'node_modules', 'vendor', '.git', '__pycache__', '.venv', 'venv',
@@ -155,6 +193,10 @@ class Scanner:
         self.use_cpg = True
         self.use_sast = False  # External tools - opt-in
         self.use_ai = False   # AI analysis - opt-in
+        # Root of the scan being finalized - the report post-processors
+        # (inline suppression, scope gates, severity matrix) resolve the
+        # relative finding paths against it.
+        self._scan_root: Optional[Path] = None
 
     def _read_file(self, filepath: Path) -> str:
         try:
@@ -447,20 +489,21 @@ class Scanner:
         if name in DEP_FILES:
             findings.extend(self._scan_dependencies(filepath, rel, content))
 
-        # Tree-sitter analysis for supported languages
+        # Tree-sitter analysis for supported languages (AST-based, context aware)
         if self.use_tree_sitter and self._ts_parser.can_parse(str(filepath)):
             try:
                 parse_result = self._ts_parser.parse_file(str(filepath), content)
                 if parse_result.success and parse_result.root:
-                    dangerous_calls = self._ts_parser._find_dangerous_calls(parse_result.root)
-                    for call in dangerous_calls:
+                    security_calls = self._ts_parser.find_security_calls(
+                        parse_result.root, str(filepath))
+                    for call in security_calls:
                         findings.append(Finding(
-                            file=rel, line=call.start_line + 1,
-                            type=f"Tree-sitter: {call.text[:60]}",
-                            severity="MEDIUM",
+                            file=rel, line=call.line,
+                            type=f"Tree-sitter: {call.name[:60]}",
+                            severity=call.severity,
                             snippet=call.text[:120],
-                            description=f"Dangerous function call detected: {call.text[:100]}",
-                            category="INJECTION",
+                            description=f"{call.name[:80]} - {call.reason}.",
+                            category=call.category,
                             analyzer="tree_sitter",
                         ))
             except Exception:
@@ -487,29 +530,37 @@ class Scanner:
         return findings
 
     def _deduplicate(self, findings: List[Finding]) -> List[Finding]:
-        exact_seen = set()
-        semantic_seen = {}
-        unique: List[Finding] = []
+        """Collapse duplicate detections from every analyzer (layering engine).
 
-        for f in findings:
-            exact_key = (f.file, f.line, f.type)
-            if exact_key in exact_seen:
-                continue
-            exact_seen.add(exact_key)
+        Findings that describe the same vulnerability (file + line +
+        category) are merged into one record whose ``analyzer`` field lists
+        every analyzer that detected it, e.g. ``taint, lexer, bandit``.
+        """
+        return layer_findings(findings)
 
-            sem_key = (f.file, f.line, _norm(f.category), f.severity)
-            existing = semantic_seen.get(sem_key)
-            if existing is not None:
-                if len(f.description) > len(existing.description):
-                    idx = {id(x): i for i, x in enumerate(unique)}[id(existing)]
-                    unique[idx] = f
-                    semantic_seen[sem_key] = f
-                continue
+    def _finalize(self, results: List[Finding]) -> List[Finding]:
+        """Report post-processing - single exit point (KernelSpy 1.5).
 
-            semantic_seen[sem_key] = f
-            unique.append(f)
-
-        return unique
+        Pipeline, in order:
+          1. inline suppression   - ``kernelspy-ignore`` comments drop a finding
+          2. scope gates          - framework rules only inside real projects
+          3. severity matrix      - command execution re-scored from context
+          4. fatal sinks          - tainted -> eval/exec/system is CRITICAL
+          5. layering + code-block merge (dedup engine)
+          6. 'How to fix' guidance + severity sort
+        """
+        loader = SourceLoader(getattr(self, "_scan_root", None)) \
+            if getattr(self, "_scan_root", None) else None
+        if loader is not None:
+            results = apply_inline_suppressions(results, loader)
+            results = apply_scope_gates(results, loader)
+        results = apply_severity_matrix(results, loader)
+        results = apply_fatal_sink_policy(results, loader)
+        results = layer_findings(results)
+        attach_remediation(results)
+        sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+        results.sort(key=lambda x: sev_order.get(x.severity, 4))
+        return results
 
     def _collect_files(self, base: Path):
         all_files = []
@@ -527,6 +578,7 @@ class Scanner:
 
     def scan(self, folder: str, progress_callback=None, cancel_check=None) -> List[Finding]:
         base = Path(folder)
+        self._scan_root = base
         all_files, self._last_py_files = self._collect_files(base)
 
         total = len(all_files)
@@ -595,7 +647,8 @@ class Scanner:
                         severity=item.get('issue_severity', 'MEDIUM').upper(),
                         snippet=item.get('code', '')[:120],
                         description=item.get('issue_text', ''),
-                        category="BANDIT",
+                        category=_BANDIT_CATEGORY.get(
+                            item.get('test_id', ''), "BANDIT"),
                         analyzer="bandit",
                     ))
         except Exception:
@@ -622,15 +675,12 @@ class Scanner:
             sast_findings = self._sast_orchestrator.scan_all(folder, progress_callback, cancel_check)
             results.extend(sast_findings)
 
-        results = self._deduplicate(results)
-        sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-        results.sort(key=lambda x: sev_order.get(x.severity, 4))
+        results = self._finalize(results)
 
         if progress_callback:
             progress_callback(100, "Scan complete.")
 
         return results
-
     def scan_threaded(self, folder: str, result_queue: queue.Queue,
                       cancel_check: Callable[[], bool]) -> threading.Thread:
         """Run the exact scan_all pipeline on a background thread.
@@ -669,6 +719,7 @@ class Scanner:
             }
             try:
                 base = Path(folder)
+                self._scan_root = base
 
                 # ── DISCOVER ── identical eligibility rules as scan_all
                 all_files, py_files = self._collect_files(base)
@@ -727,10 +778,7 @@ class Scanner:
                         )
                         results.extend(sast_findings)
 
-                results = self._deduplicate(results)
-                sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2,
-                             "LOW": 3, "INFO": 4}
-                results.sort(key=lambda x: sev_order.get(x.severity, 4))
+                results = self._finalize(results)
 
                 payload = {
                     'results': results,

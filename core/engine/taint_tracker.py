@@ -2,6 +2,11 @@ import re
 from typing import Dict, List, Tuple
 
 from ..models import Finding
+from .sanitizers import kind_for_sink, line_sanitizes
+from .flow_refine import (
+    JS_EXTS, go_channel_update, js_collect_object_handlers,
+    fold_js_string_constants, resolve_js_dynamic_call, objref_finding,
+)
 
 
 def _sink(label: str, pattern: str, severity: str) -> Tuple:
@@ -255,6 +260,7 @@ class TaintTracker:
     def __init__(self):
         self._sources: Dict[str, Tuple] = {}
         self._sinks: Dict[str, List[Tuple]] = {}
+        self._word_re: Dict[str, re.Pattern] = {}
 
     def _get_sources(self, ext: str) -> Tuple:
         if ext not in self._sources:
@@ -265,6 +271,40 @@ class TaintTracker:
         if ext not in self._sinks:
             self._sinks[ext] = SINKS.get(ext, [])
         return self._sinks[ext]
+
+    def _word_re_for(self, var: str) -> re.Pattern:
+        cached = self._word_re.get(var)
+        if cached is None:
+            cached = re.compile(r'\b' + re.escape(var) + r'\b')
+            if len(self._word_re) < 4096:
+                self._word_re[var] = cached
+        return cached
+
+    @staticmethod
+    def _context_severity(sink_label: str, line: str, default: str) -> str:
+        """Context-aware sink severity (KernelSpy 1.3).
+
+        ``subprocess.*`` is only a real threat when a shell is involved or
+        when the payload is passed as a single unparsed string.
+        """
+        if sink_label != 'subprocess':
+            return default
+        if re.search(r'shell\s*=\s*True', line):
+            return 'CRITICAL'
+        if re.search(r'subprocess\.\w+\s*\(\s*[\[\(\w]', line) and 'shell' not in line:
+            return 'LOW'          # argument vector -> no shell interpretation
+        if re.search(r'list\s*\(|\[\s*[\'"]', line) and 'shell' not in line:
+            return 'LOW'
+        return 'HIGH'
+
+    @staticmethod
+    def _callee_severity(callee: str, sinks: List[Tuple]) -> str:
+        """Severity a resolved handler deserves, taken from the sink table."""
+        probe = callee + '('
+        for _label, sink_re, severity in sinks:
+            if sink_re.search(probe):
+                return severity
+        return 'HIGH'
 
     def analyze(self, filepath: str, content: str, ext: str) -> List[Finding]:
         if ext not in SOURCES or ext not in SINKS:
@@ -277,9 +317,25 @@ class TaintTracker:
         findings: List[Finding] = []
         used_keys = set()
 
-        def emit(line_num: int, var: str, sink_label: str, severity: str, snippet: str):
+        # ── refinements (KernelSpy 1.4.3) ──────────────────────────────
+        # Go:  ch <- tainted   poisons the channel,  v := <-ch inherits it
+        tainted_channels: Dict[str, int] = {}
+        # JS:  const h = { html: (x) => res.send(x) }  +  h[key](param)
+        obj_handlers: Dict[str, Dict[str, str]] = {}
+        js_consts: Dict[str, str] = {}
+        if ext in JS_EXTS:
+            obj_handlers = js_collect_object_handlers(content)
+            js_consts = fold_js_string_constants(content)
+
+        def emit(line_num: int, var: str, sink_label: str, severity: str, snippet: str,
+                 line: str = ""):
             key = (line_num, var, sink_label)
             if key in used_keys:
+                return
+            # Sanitizer filter: if the sink call itself passes the value
+            # through a trusted helper, the flow is clean - drop the alert.
+            kind = kind_for_sink(ext, sink_label, 'INJECTION')
+            if kind and line_sanitizes(line, ext, kind):
                 return
             used_keys.add(key)
             source_line = tainted.get(var, line_num)
@@ -302,33 +358,72 @@ class TaintTracker:
             if not line:
                 continue
             line_num = idx + 1
+            # fast pre-filter: only run per-variable regex when the literal
+            # variable name appears somewhere on the line
+            tainted_here = [v for v in tainted if v in line]
+
+            # ── Go: channel send poisons, receive inherits ─────────────
+            if ext == '.go':
+                before = len(tainted)
+                go_channel_update(line, line_num, sources, tainted,
+                                  tainted_channels, self._word_re_for)
+                if len(tainted) != before:
+                    tainted_here = [v for v in tainted if v in line]
+
+            # ── JS: h[key](param) really calls the mapped handler ──────
+            if obj_handlers:
+                hit = resolve_js_dynamic_call(line, obj_handlers, js_consts)
+                if hit:
+                    obj, key, callee = hit
+                    present = [
+                        v for v in tainted_here
+                        if self._word_re_for(v).search(line)
+                    ]
+                    direct = [s for s in sources if s in line]
+                    if present or direct:
+                        var = present[0] if present else direct[0]
+                        dedup_key = (line_num, obj, key, callee)
+                        if dedup_key not in used_keys:
+                            used_keys.add(dedup_key)
+                            findings.append(objref_finding(
+                                filepath, line_num, line, obj, key, callee,
+                                var, tainted.get(var, line_num),
+                                self._callee_severity(callee, sinks)))
 
             for sink_label, sink_re, severity in sinks:
                 if not sink_re.search(line):
                     continue
                 present_vars = [
-                    v for v in tainted
-                    if re.search(r'\b' + re.escape(v) + r'\b', line)
+                    v for v in tainted_here if self._word_re_for(v).search(line)
                 ]
                 if present_vars:
-                    emit(line_num, present_vars[0], sink_label, severity, line[:120])
+                    sev = self._context_severity(sink_label, line, severity)
+                    emit(line_num, present_vars[0], sink_label, sev,
+                         line[:120], line)
                 else:
                     direct = [s for s in sources if s in line]
                     if direct:
-                        emit(line_num, direct[0], sink_label, severity, line[:120])
+                        sev = self._context_severity(sink_label, line, severity)
+                        emit(line_num, direct[0], sink_label, sev,
+                             line[:120], line)
 
             if assign_re:
-                for src in sources:
-                    if src not in line:
-                        continue
-                    m = assign_re.search(line)
-                    if m and m.group(1):
-                        tainted[m.group(1)] = line_num
+                m = assign_re.search(line)
+                assigned = m.group(1) if (m and m.group(1)) else None
 
-                for v, sl in list(tainted.items()):
-                    if re.search(r'\b' + re.escape(v) + r'\b', line):
-                        m = assign_re.search(line)
-                        if m and m.group(1) and m.group(1) != v:
-                            tainted[m.group(1)] = sl
+                # ── Sanitizers registry: x = sanitize(y)  ->  x is CLEAN ──
+                if assigned and line_sanitizes(line, ext):
+                    tainted.pop(assigned, None)
+                    continue
+
+                if assigned and any(src in line for src in sources):
+                    tainted[assigned] = line_num
+
+                if assigned:
+                    for v, sl in list(tainted.items()):
+                        if v == assigned:
+                            continue
+                        if v in line and self._word_re_for(v).search(line):
+                            tainted[assigned] = sl
 
         return findings

@@ -1,0 +1,156 @@
+{
+  "SQL_INJECTION": {
+    "title": "SQL Injection Detected",
+    "categories": ["INJECTION"],
+    "type_keywords": ["sql", "execute", "query", "cursor", "statement", "raw", "mogrify", "find_by_sql"],
+    "remediation": "Never build SQL from user input. Use prepared statements / parameterised queries so the driver separates code from data, and validate input against an allow-list.",
+    "code": {
+      "python": "cursor.execute(\"SELECT * FROM users WHERE id = %s\", (user_id,))",
+      "php": "$stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id');\n$stmt->execute([':id' => $id]);",
+      "javascript": "db.query('SELECT * FROM users WHERE id = ?', [id]);",
+      "java": "PreparedStatement ps = conn.prepareStatement(\"SELECT * FROM users WHERE id = ?\");\nps.setInt(1, id);",
+      "go": "row := db.QueryRowContext(ctx, \"SELECT * FROM users WHERE id = ?\", id)",
+      "default": "cursor.execute(\"SELECT ... WHERE col = %s\", (value,))"
+    }
+  },
+  "COMMAND_INJECTION": {
+    "title": "OS Command Injection",
+    "categories": ["INJECTION"],
+    "type_keywords": ["os.system", "os.popen", "subprocess", "child_process", "shell", "exec", "command", "system(", "popen", "runtime.exec", "processbuilder", "shell_exec", "passthru", "proc_open", "eval", "backtick"],
+    "remediation": "Do not pass untrusted data to a shell. Call the binary directly with an argument list (no shell), keep shell=False, and allow-list the permitted commands.",
+    "code": {
+      "python": "subprocess.run([\"ls\", \"-l\", path], shell=False, check=True, capture_output=True)",
+      "javascript": "const { execFile } = require('child_process');\nexecFile('/bin/ls', ['-l', path], cb);",
+      "php": "proc_open($cmd, $descriptors, $pipes, null, $env);  // never interpolate $_GET",
+      "go": "exec.Command(\"ls\", \"-l\", path).Run()",
+      "default": "run the binary directly with an argument vector, never through a shell"
+    }
+  },
+  "CODE_INJECTION": {
+    "title": "Dynamic Code Evaluation",
+    "categories": ["INJECTION"],
+    "type_keywords": ["eval", "exec(", "__import__", "importlib.import_module", "new function", "create_function", "assert(", "vm.run", "render_template_string", "ssti", "getattr"],
+    "remediation": "Remove dynamic code execution. Replace eval/exec with an explicit dispatch table (dict of allowed operations) and render templates from files, never from user strings.",
+    "code": {
+      "python": "handlers = {'sum': sum, 'len': len}\nresult = handlers[op](data)",
+      "javascript": "const handlers = { sum: (a) => a.reduce((x, y) => x + y, 0) };\nhandlers[op](data);",
+      "default": "use a dispatch table instead of evaluating strings as code"
+    }
+  },
+  "XSS": {
+    "title": "Cross-Site Scripting (XSS)",
+    "categories": ["XSS"],
+    "type_keywords": ["innerhtml", "document.write", "dangerouslysetinnerhtml", "insertadjacenthtml", "echo", "render", "res.send", "v-html", "xss"],
+    "remediation": "Escape/encode every untrusted value in its output context (HTML, attribute, JS, URL) and prefer framework templates that auto-escape. Use a strict Content-Security-Policy as defence in depth.",
+    "code": {
+      "javascript": "element.textContent = userInput;              // preferred\nel.innerHTML = he.encode(userInput);        // if HTML is required",
+      "python": "return render_template('profile.html', name=html.escape(user_input))",
+      "php": "echo htmlspecialchars($input, ENT_QUOTES, 'UTF-8');",
+      "default": "encode untrusted output for its context before rendering"
+    }
+  },
+  "PATH_TRAVERSAL": {
+    "title": "Path Traversal / Local File Inclusion",
+    "categories": ["TRAVERSAL", "UPLOAD", "REDIRECT"],
+    "type_keywords": ["open", "send_file", "file_get_contents", "include", "require", "readfile", "read", "traversal", "lfi", "path"],
+    "remediation": "Resolve the path against a fixed base directory and reject anything that escapes it. Allow-list file names instead of accepting raw paths, and never concatenate user input into a filesystem path.",
+    "code": {
+      "python": "base = Path(app.root_path) / 'uploads'\ntarget = (base / name).resolve()\nif not target.is_relative_to(base):  raise ValueError('illegal path')",
+      "php": "$target = realpath(BASE_DIR . '/' . basename($name));\nif ($target === false || !str_starts_with($target, BASE_DIR)) { exit; }",
+      "javascript": "const target = path.resolve(UPLOAD_DIR, path.basename(name));\nif (!target.startsWith(UPLOAD_DIR)) throw new Error('illegal path');",
+      "default": "resolve against a trusted base directory and verify containment"
+    }
+  },
+  "DESERIALIZATION": {
+    "title": "Unsafe Deserialization",
+    "categories": ["DESERIALIZATION"],
+    "type_keywords": ["pickle", "yaml.load", "marshal", "unserialize", "binaryformatter", "objectinputstream", "xstream", "readobject", "jsonpickle", "marshal.load"],
+    "remediation": "Never deserialize untrusted data with a format that can execute code. Use JSON (or another data-only format), schema validation, and for YAML always pass Loader=SafeLoader.",
+    "code": {
+      "python": "import yaml\ndata = yaml.load(text, Loader=yaml.SafeLoader)\n\n# pickle: use json instead of pickle.loads()",
+      "javascript": "const data = JSON.parse(text);   // never unserialize user blobs",
+      "php": "$data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);",
+      "default": "use a data-only format such as JSON with schema validation"
+    }
+  },
+  "WEAK_CRYPTO": {
+    "title": "Weak Cryptography",
+    "categories": ["CRYPTO"],
+    "type_keywords": ["md5", "sha1", "des", "rc4", "random", "math.random", "ecb", "pad"],
+    "remediation": "MD5/SHA-1 and non-CSPRNG generators must not protect secrets. Use SHA-256+ (or bcrypt/scrypt/argon2 for passwords) and a cryptographically secure RNG.",
+    "code": {
+      "python": "import hashlib, secrets\nfingerprint = hashlib.sha256(data).hexdigest()\ntoken = secrets.token_urlsafe(32)",
+      "javascript": "const fingerprint = await crypto.subtle.digest('SHA-256', buf);\nconst token = crypto.randomUUID();",
+      "default": "use SHA-256+ / bcrypt / a CSPRNG"
+    }
+  },
+  "HARDCODED_SECRET": {
+    "title": "Hardcoded Credential or Secret",
+    "categories": ["SECRET", "AUTH"],
+    "type_keywords": ["password", "api key", "aws", "token", "secret", "credential", "private key", "braintree", "access_key"],
+    "remediation": "Remove the literal from source, rotate the exposed value, and read it at runtime from an environment variable or a secret manager. Keep a .env file out of version control.",
+    "code": {
+      "python": "import os\npassword = os.environ['DB_PASSWORD']",
+      "javascript": "const password = process.env.DB_PASSWORD;",
+      "php": "$password = getenv('DB_PASSWORD');",
+      "default": "os.environ['SECRET'] // never commit a literal"
+    }
+  },
+  "SSRF": {
+    "title": "Server-Side Request Forgery (SSRF)",
+    "categories": ["SSRF"],
+    "type_keywords": ["http.get", "http.post", "requests.get", "urllib", "fetch(", "axios", "curl"],
+    "remediation": "Do not let users choose the destination URL. Allow-list schemes and hosts, block private/link-local ranges (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, metadata IPs) and resolve the DNS before connecting.",
+    "code": {
+      "python": "ALLOWED = {'api.example.com'}\nhost = urlparse(url).hostname\nif host not in ALLOWED:  raise ValueError('blocked host')",
+      "javascript": "const u = new URL(url);\nif (!ALLOWED_HOSTS.includes(u.hostname)) throw new Error('blocked host');",
+      "default": "validate the destination against an allow-list before requesting it"
+    }
+  },
+  "INSECURE_CONFIG": {
+    "title": "Insecure Configuration",
+    "categories": ["CONFIG"],
+    "type_keywords": ["debug", "allow_all", "cors", "allowed_hosts", "csrf", "wildcard", "disabled"],
+    "remediation": "Turn debug mode off in production, restrict CORS to known origins, pin ALLOWED_HOSTS, and never disable CSRF protection globally.",
+    "code": {
+      "python": "DEBUG = False\nALLOWED_HOSTS = ['example.com']\nCORS_ORIGIN_ALLOW_ALL = False",
+      "default": "deny by default; enable only what production needs"
+    }
+  },
+  "VULNERABLE_DEPENDENCY": {
+    "title": "Vulnerable Dependency",
+    "categories": ["DEPENDENCY", "PACKAGE"],
+    "type_keywords": ["vulnerable package"],
+    "remediation": "Upgrade to the patched version listed in the advisory, then re-scan. Pin exact versions and run an SCA check in CI so regressions are caught before release.",
+    "code": {
+      "default": "pip install --upgrade <package>   # or npm audit fix / composer update"
+    }
+  },
+  "TAINT_FLOW": {
+    "title": "Untrusted Data Reaches a Dangerous Sink",
+    "categories": ["INJECTION"],
+    "type_keywords": ["taint"],
+    "remediation": "Sanitise or validate the value where it enters the system, then use the safe API for the sink (parameterised query, argument vector, auto-escaping template). See the specific sink rule for the exact fix.",
+    "code": {
+      "default": "value = sanitize(value)   # trusted input only, then call the safe API"
+    }
+  },
+  "DANGEROUS_SINK": {
+    "title": "Dangerous Function Used",
+    "categories": ["INJECTION", "TRAVERSAL"],
+    "type_keywords": ["tree-sitter", "lexer", "dangerous"],
+    "remediation": "Prefer the safe equivalent of this API and only call it with trusted, validated input. If the call is unavoidable, allow-list the arguments and fail closed.",
+    "code": {
+      "default": "use the safe API variant with validated input"
+    }
+  },
+  "GENERIC": {
+    "title": "Security Finding",
+    "categories": [],
+    "type_keywords": [],
+    "remediation": "Review the flagged code, confirm whether untrusted input can reach it, and apply the framework-recommended safe API for this operation.",
+    "code": {
+      "default": "apply the framework-recommended safe API"
+    }
+  }
+}

@@ -1,6 +1,12 @@
 import ast
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional
+
 from ..models import Finding
+from .sanitizers import is_sanitizer, kind_for_sink
+from .flow_refine import (
+    PY_DANGEROUS, fold_python_constants, constfold_finding,
+)
 
 
 # Values that indicate a template/placeholder rather than a real credential.
@@ -43,6 +49,12 @@ CREDENTIAL_NAME_HINTS = {
 
 WEAK_HASH_FUNCS = {'md5': 'HIGH', 'sha1': 'MEDIUM'}
 
+# Sinks that no escaper can ever make safe - never suppressed by sanitizers.
+NEVER_SAFE = (
+    'eval', 'exec', '__import__', 'importlib', 'pickle', 'marshal',
+    'render_template_string', 'getattr', 'yaml.load',
+)
+
 
 class PythonASTAnalyzer:
     def analyze(self, filepath: str, content: str) -> List[Finding]:
@@ -57,7 +69,94 @@ class PythonASTAnalyzer:
             self._check_assign(node, filepath, findings)
             self._check_import(node, filepath, findings)
 
+        self._check_constant_folding(tree, content, filepath, findings)
+
         return findings
+
+    # ───────── CONSTANT FOLDING & PROPAGATION (KernelSpy 1.4.3) ─────────
+    _DICT_ROOTS = ('globals', 'locals', 'vars')
+
+    def _check_constant_folding(self, tree, content: str, filepath: str,
+                                findings: List[Finding]):
+        """Catch ``globals()[name]()`` where ``name`` folds to ``eval``.
+
+        ``part1 = "ev"; part2 = "al"; name = part1 + part2`` is folded first,
+        then every ``globals()/locals()/vars()/__builtins__`` lookup and every
+        ``getattr(obj, name)`` is resolved through the folded map.
+        """
+        consts = fold_python_constants(content)
+        if not consts:
+            consts = {}                       # keep the type narrow
+        def_lines: Dict[str, int] = {}
+        for i, raw in enumerate(content.split('\n'), 1):
+            m = re.match(r'\s*(\w+)\s*=', raw)
+            if m and m.group(1) in consts:
+                def_lines.setdefault(m.group(1), i)
+
+        seen = set()
+        for node in ast.walk(tree):
+            # globals()[name] / locals()[name] / __builtins__[name]
+            if isinstance(node, ast.Subscript) and self._is_global_dict(node.value):
+                key, var, src_line = self._fold_operand(node.slice, consts, def_lines)
+                self._emit_fold(filepath, node, key, var, src_line, findings,
+                                seen, f"{self._dict_label(node.value)}[{var or '?'}]")
+            # globals().get(name) / locals().get(name)
+            elif (isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == 'get'
+                  and self._is_global_dict(node.func.value)
+                  and node.args):
+                key, var, src_line = self._fold_operand(node.args[0], consts, def_lines)
+                self._emit_fold(filepath, node, key, var, src_line, findings,
+                                seen,
+                                f"{self._dict_label(node.func.value)}.get({var or '?'})")
+            # getattr(obj, name)
+            elif (isinstance(node, ast.Call)
+                  and self._call_is(node, 'getattr')
+                  and len(node.args) >= 2):
+                key, var, src_line = self._fold_operand(node.args[1], consts, def_lines)
+                self._emit_fold(filepath, node, key, var, src_line, findings,
+                                seen, f"getattr(obj, {var or '?'})")
+
+    def _emit_fold(self, filepath, node, key, var, src_line,
+                   findings, seen, expr_text: str):
+        if key not in PY_DANGEROUS:
+            return
+        lineno = getattr(node, 'lineno', 0)
+        dedup = (lineno, key)
+        if dedup in seen:
+            return
+        seen.add(dedup)
+        findings.append(constfold_finding(
+            filepath, lineno, expr_text, var or '', key, src_line))
+
+    def _dict_label(self, node) -> str:
+        """Readable name of the dict being indexed: ``globals()`` / ``__builtins__``."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return f"{node.func.id}()"
+        return '__builtins__'
+
+    def _is_global_dict(self, node) -> bool:
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            return node.func.id in self._DICT_ROOTS
+        return isinstance(node, ast.Name) and node.id == '__builtins__'
+
+    @staticmethod
+    def _call_is(node: ast.Call, name: str) -> bool:
+        return isinstance(node.func, ast.Name) and node.func.id == name
+
+    def _fold_operand(self, node, consts: Dict[str, str], def_lines: Dict[str, int]):
+        """(folded value, variable name, definition line) for a name/expr."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value, node.value, 0
+        if isinstance(node, ast.Name):
+            return consts.get(node.id), node.id, def_lines.get(node.id, 0)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, lvar, lline = self._fold_operand(node.left, consts, def_lines)
+            right, rvar, rline = self._fold_operand(node.right, consts, def_lines)
+            if left is not None and right is not None:
+                return left + right, f"{lvar} + {rvar}", lline or rline
+        return None, None, 0
 
     def _check_call(self, node: ast.AST, filepath: str, findings: List[Finding]):
         if not isinstance(node, ast.Call):
@@ -118,40 +217,76 @@ class PythonASTAnalyzer:
             ))
 
         if func_name in ('os.system', 'os.popen'):
-            findings.append(Finding(
-                file=filepath,
-                line=lineno,
-                type=f"AST: {func_name}",
-                severity="HIGH",
-                snippet=f"{func_name}()",
-                description=f"{func_name} allows command injection. Use subprocess.run().",
-                category="INJECTION",
-                analyzer="ast",
-            ))
+            if not self._suppressed(node, 'INJECTION', func_name):
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type=f"AST: {func_name}",
+                    severity="HIGH",
+                    snippet=f"{func_name}()",
+                    description=f"{func_name} allows command injection. Use subprocess.run().",
+                    category="INJECTION",
+                    analyzer="ast",
+                ))
 
-        if func_name.startswith('subprocess.') and self._has_shell_true(node):
-            findings.append(Finding(
-                file=filepath,
-                line=lineno,
-                type="AST: subprocess with shell=True",
-                severity="HIGH",
-                snippet="subprocess...(shell=True)",
-                description="subprocess with shell=True allows command injection.",
-                category="INJECTION",
-                analyzer="ast",
-            ))
+        if func_name.startswith('subprocess.'):
+            shape = self._subprocess_shape(node)
+            if shape == 'shell_true':
+                # shell=True -> untrusted data is interpreted by /bin/sh
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type="AST: subprocess with shell=True",
+                    severity="CRITICAL",
+                    snippet=self._call_snippet(node),
+                    description="subprocess with shell=True allows command injection. "
+                                "Pass an argument list with shell=False instead.",
+                    category="INJECTION",
+                    analyzer="ast",
+                ))
+            elif shape == 'string_dynamic' and self._has_dynamic_query(node):
+                # single unparsed string command built at runtime -> risky
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type="AST: subprocess command built dynamically",
+                    severity="HIGH",
+                    snippet=self._call_snippet(node),
+                    description="subprocess receives a dynamically built command "
+                                "string. Use an argument vector (list) with shell=False.",
+                    category="INJECTION",
+                    analyzer="ast",
+                ))
+            elif shape == 'no_shell_dynamic':
+                # shell=False explicitly set: no shell metacharacter
+                # interpretation, only review-level risk.
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type="AST: subprocess argument built dynamically",
+                    severity="LOW",
+                    snippet=self._call_snippet(node),
+                    description="subprocess is called with shell=False (good) but "
+                                "the command string is built at runtime. Prefer an "
+                                "argument list.",
+                    category="INJECTION",
+                    analyzer="ast",
+                ))
+            # shape == 'list' / 'static' -> argument vector, no shell involved:
+            # safe by construction, not reported.
 
         if func_name == 'open' and self._has_user_input(node):
-            findings.append(Finding(
-                file=filepath,
-                line=lineno,
-                type="AST: open() with user input",
-                severity="HIGH",
-                snippet="open(...)",
-                description="File open with untrusted input - path traversal risk.",
-                category="TRAVERSAL",
-                analyzer="ast",
-            ))
+            if not self._suppressed(node, 'TRAVERSAL', func_name):
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type="AST: open() with user input",
+                    severity="HIGH",
+                    snippet="open(...)",
+                    description="File open with untrusted input - path traversal risk.",
+                    category="TRAVERSAL",
+                    analyzer="ast",
+                ))
 
         if func_name == 'render_template_string':
             findings.append(Finding(
@@ -191,19 +326,20 @@ class PythonASTAnalyzer:
 
         # ── Context-aware: SQL built through string formatting/concatenation ──
         if self._is_sql_sink(func_name) and self._has_dynamic_query(node):
-            findings.append(Finding(
-                file=filepath,
-                line=lineno,
-                type="AST: SQL query via string formatting",
-                severity="CRITICAL",
-                snippet=self._call_snippet(node),
-                description=(
-                    f"{func_name}() builds its SQL from string formatting or "
-                    "concatenation - SQL injection risk. Use parameterized queries."
-                ),
-                category="INJECTION",
-                analyzer="ast",
-            ))
+            if not self._suppressed(node, 'INJECTION', func_name):
+                findings.append(Finding(
+                    file=filepath,
+                    line=lineno,
+                    type="AST: SQL query via string formatting",
+                    severity="CRITICAL",
+                    snippet=self._call_snippet(node),
+                    description=(
+                        f"{func_name}() builds its SQL from string formatting or "
+                        "concatenation - SQL injection risk. Use parameterized queries."
+                    ),
+                    category="INJECTION",
+                    analyzer="ast",
+                ))
 
         # ── Context-aware: weak hash functions ──
         base_func = func_name.rsplit('.', 1)[-1]
@@ -356,6 +492,66 @@ class PythonASTAnalyzer:
                 if isinstance(kw.value, ast.Constant):
                     return kw.value.value is True
         return False
+
+    # ── Sanitizers / context-aware helpers (KernelSpy 1.3) ────────────
+
+    def _suppressed(self, node: ast.Call, category: str, func_name: str) -> bool:
+        """True when every risky argument passes through a trusted helper."""
+        if any(n in (func_name or '') for n in NEVER_SAFE):
+            return False
+        kind = kind_for_sink('.py', func_name or '', category)
+        if not kind:
+            return False
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            if self._call_sanitizes(arg, kind):
+                return True
+        return False
+
+    def _call_sanitizes(self, node: ast.AST, kind: str) -> bool:
+        if isinstance(node, ast.Call):
+            name = self._get_call_name(node) or ''
+            if is_sanitizer(name, '.py', kind):
+                return True
+            for sub in ast.iter_child_nodes(node):
+                if self._call_sanitizes(sub, kind):
+                    return True
+        return False
+
+    def _subprocess_shape(self, node: ast.Call) -> str:
+        """Classify a subprocess call: shell_true / list / string_dynamic /
+        string_static / unknown - drives context-aware severity."""
+        for kw in node.keywords:
+            if kw.arg == 'shell':
+                if isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                    return 'shell_true'
+                if self._first_arg_is_dynamic(node) and self._has_dynamic_query(node):
+                    return 'no_shell_dynamic'
+                return 'list'
+        if self._has_shell_true(node):
+            return 'shell_true'
+        if not node.args:
+            return 'unknown'
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            return 'list'
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return 'string_static'
+        if self._is_dynamic_string(first):
+            return 'string_dynamic'
+        if isinstance(first, (ast.Name, ast.Attribute, ast.Subscript)):
+            return 'string_dynamic' if self._has_dynamic_query(node) else 'list'
+        return 'unknown'
+
+    @staticmethod
+    def _first_arg_is_dynamic(node: ast.Call) -> bool:
+        if not node.args:
+            return False
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            return False
+        if isinstance(first, ast.Constant):
+            return False
+        return True
 
     # ── Context-aware helpers ─────────────────────────────────────────
 

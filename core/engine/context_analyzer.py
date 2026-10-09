@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 from ..models import Finding
 from .ast_analyzer import is_placeholder_value
-from .context import strip_comments_and_strings
+from .context import strip_comments
 
 # Extensions considered "code" for contextual analysis.
 CODE_EXTS = {
@@ -34,14 +34,26 @@ _SQL_SINK = re.compile(
     r'\s*\(', re.IGNORECASE)
 
 _DYNAMIC_ARGS = re.compile(
-    r'`[^`]*\$\{[^}]+\}[^`]*`'          # JS/Go/Kotlin template literal w/ ${}
-    r'|f"[^"]*\{|f\'[^\']*\{'           # Python f-string
-    r'|\+\s*\w+'                        # "... " + var
-    r'|\w+\s*\+'                        # var + "..."
-    r'|%\s*\w+\)?\s*$'                  # "... %s" % x  (line-end heuristic)
-    r'|\.format\s*\('                   # "...".format(...)
-    r'|\$\w+'                           # PHP "$var" inside query string
+    r'`[^`]*\$\{[^}]+\}[^`]*`'                                  # JS template w/ ${}
+    r'|f"[^"]*\{|f\'[^\']*\{'                                   # Python f-string
+    r'|"(?:\\.|[^"\\])*"\s*\+\s*[A-Za-z_$]'                     # "..." + var
+    r"|'(?:\\.|[^'\\])*'\s*\+\s*[A-Za-z_$]"                     # '...' + var
+    r'|[A-Za-z_$\)\]]\s*\+\s*"(?:\\.|[^"\\])*'                  # var + "..."
+    r'|[A-Za-z_$\)\]]\s*\+\s*\'(?:\\.|[^\'\\])*\''              # var + '...'
+    # Python / printf style "%s" % value
+    r'|["\'][^"\']*(?:%s|%d|%i|%r|%\(\w+\)s)[^"\']*["\']\s*%\s*[A-Za-z_(\[]'
+    # PHP / Perl style "SELECT ..." . $var
+    r'|["\'][^"\']*["\']\s*\.\s*\$'
+    r'|\$\w+\s*\.\s*["\']'
+    r'|\.format\s*\('                                           # "...".format(...)
+    r'|\b(?:printf|sprintf)\s*\('                               # printf(...)
+    r'|"(?:\\.|[^"\\])*\$\w[^"]*"'                              # PHP "SELECT $q"
+    r'|\$\{[^}]+\}'                                             # ${var}
 )
+# Bound-parameter shapes that are NOT dynamic query construction.
+_PREPARED_CALL = re.compile(
+    r'(?:^|\W)(?:prepare|preparedstatement|createstatement|bind|'
+    r'addwithvalue|setstring|setint)\s*\(', re.IGNORECASE)
 
 # ── Log4Shell / JNDI injection payload (any language, any file) ──
 JNDI_PAYLOAD = re.compile(r'\$\{jndi:(?:ldap|rmi|dns|iiop|corba|nds|http)s?://', re.IGNORECASE)
@@ -114,8 +126,6 @@ class ContextAnalyzer:
             return []
 
         findings: List[Finding] = []
-        clean = strip_comments_and_strings(content, ext)
-        clean_lines = clean.split('\n')
         raw_lines = content.split('\n')
 
         # Detect if this is a test file (reduces severity for some findings)
@@ -140,12 +150,17 @@ class ContextAnalyzer:
                 ))
 
         # ── 2. SQL sink called with dynamically built query text ──
-        # Runs on COMMENT-STRIPPED lines so commented-out queries never fire.
+        # Runs on COMMENT-STRIPPED (but string-preserving) lines: the dynamic
+        # construction lives INSIDE the query literal ("SELECT $id", "…" + x)
+        # while commented-out calls must never fire.
         if ext in ('.js', '.ts', '.jsx', '.tsx', '.php', '.java', '.cs',
                    '.go', '.kt', '.scala', '.groovy'):
-            for i, line in enumerate(clean_lines, 1):
+            no_comment = strip_comments(content, ext).split('\n')
+            for i, line in enumerate(no_comment, 1):
                 if not _SQL_SINK.search(line):
                     continue
+                if _PREPARED_CALL.search(line):
+                    continue        # parameterised statement / bound args
                 arg_zone = line.split('(', 1)[1] if '(' in line else ''
                 if _DYNAMIC_ARGS.search(arg_zone):
                     sev = "MEDIUM" if is_test else "CRITICAL"

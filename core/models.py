@@ -88,6 +88,9 @@ class Finding:
     description: str
     category: str = "SECRET"
     analyzer: str = "pattern"
+    remediation: str = ""
+    fix_title: str = ""
+    fix_code: str = ""
 
     @property
     def severity_enum(self) -> Severity:
@@ -95,6 +98,28 @@ class Finding:
             return Severity(self.severity)
         except ValueError:
             return Severity.INFO
+
+    @property
+    def analyzer_list(self) -> List[str]:
+        """All analyzers that reported this finding (deduped, ordered)."""
+        out: List[str] = []
+        for part in str(self.analyzer or "").strip("[]").replace("|", ",").split(","):
+            p = part.strip().strip("'\"")
+            if p and p not in out:
+                out.append(p)
+        return out or ["pattern"]
+
+    @property
+    def how_to_fix(self) -> str:
+        """Human readable 'How to fix' block for the UI / reports."""
+        parts = []
+        if self.fix_title:
+            parts.append(self.fix_title)
+        if self.remediation:
+            parts.append(self.remediation)
+        if self.fix_code:
+            parts.append(self.fix_code)
+        return "\n".join(parts)
 
     def to_dict(self) -> dict:
         return {
@@ -106,6 +131,10 @@ class Finding:
             "description": self.description,
             "category": self.category,
             "analyzer": self.analyzer,
+            "analyzers": self.analyzer_list,
+            "fix_title": self.fix_title,
+            "remediation": self.remediation,
+            "fix_code": self.fix_code,
         }
 
 

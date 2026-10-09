@@ -12,6 +12,21 @@ from typing import Optional, Dict, List, Set, Tuple
 from enum import Enum
 import re
 
+# Context gates for raw string-concatenation observations.
+_SQL_CTX = re.compile(
+    r'\b(?:select|insert|update|delete|where|from|values|join|sql|query|'
+    r'execute|executesql|table)\b', re.I)
+_PATH_CTX = re.compile(
+    r'\b(?:open|read|write|file|path|include|require|load|fopen|readfile|'
+    r'send_file|dir|folder)\b', re.I)
+# A path keyword alone is too weak (``run(cmd, path)`` is not a path concat);
+# require a literal containing a separator or an explicit join().
+_PATH_SHAPE = re.compile(r'/|\\|\bjoin\s*\(', re.I)
+
+
+def _is_path_concat(label: str) -> bool:
+    return bool(_PATH_CTX.search(label)) and bool(_PATH_SHAPE.search(label))
+
 
 class NodeType(Enum):
     """Types of CPG nodes."""
@@ -372,7 +387,10 @@ class CPGBuilder:
 
         # Detect string concatenation (potential injection)
         if language == 'python':
-            if 'f"' in line or "f'" in line or '%' in line or '.format(' in line:
+            if (('f"' in line or "f'" in line or '%' in line
+                 or '.format(' in line)
+                    or ('+' in line and '"' in line)
+                    or ('+' in line and "'" in line)):
                 node_id = node_id or self._new_id()
                 self._nodes[node_id] = CPGNode(
                     id=node_id,
@@ -419,22 +437,29 @@ class CPGBuilder:
         return node_id
 
     def _build_ddg(self):
-        """Build Data Dependency Graph edges."""
-        for var_name, defs in self._variable_defs.items():
-            for def_node in defs:
-                for node_id, node in self._nodes.items():
-                    if node == def_node:
+        """Build Data Dependency Graph edges.
+
+        Single pass over the nodes (KernelSpy 1.3): each node's identifiers
+        are matched against the definition index once, which turns the old
+        O(defs x nodes) substring scan into O(nodes x identifiers).
+        """
+        if not self._variable_defs:
+            return
+        tok_re = re.compile(r'[A-Za-z_]\w*')
+        for node_id, node in self._nodes.items():
+            if node.is_comment:
+                continue
+            text = f"{node.label} {node.metadata.get('value', '')}"
+            for tok in set(tok_re.findall(text)):
+                for def_node in self._variable_defs.get(tok, ()):
+                    if def_node.id == node_id:
                         continue
-                    if node.is_comment:
-                        continue
-                    # Check if the variable is used in this node
-                    if var_name in node.label or var_name in str(node.metadata.get('value', '')):
-                        self._ddg_edges.append(CPGEdge(
-                            source_id=def_node.id,
-                            target_id=node_id,
-                            edge_type=EdgeType.DATA_FLOW,
-                            label=f"{var_name} flows to",
-                        ))
+                    self._ddg_edges.append(CPGEdge(
+                        source_id=def_node.id,
+                        target_id=node_id,
+                        edge_type=EdgeType.DATA_FLOW,
+                        label=f"{tok} flows to",
+                    ))
 
     @property
     def nodes(self) -> Dict[str, CPGNode]:
@@ -499,14 +524,16 @@ class CPG:
 
         return None
 
-    def find_all_taint_flows(self) -> List[TaintFlow]:
-        """Find all taint flows from sources to sinks."""
+    def find_all_taint_flows(self, max_flows: int = 60) -> List[TaintFlow]:
+        """Find all taint flows from sources to sinks (bounded for speed)."""
         flows = []
         for source in self.get_sources():
             for sink in self.get_sinks():
                 flow = self.trace_taint_flow(source, sink)
                 if flow:
                     flows.append(flow)
+                    if len(flows) >= max_flows:
+                        return flows
         return flows
 
     def is_in_comment(self, line: int) -> bool:
@@ -524,12 +551,14 @@ class CPG:
                 return True
         return False
 
-    def get_security_summary(self) -> Dict:
+    def get_security_summary(self, flows: Optional[List[TaintFlow]] = None) -> Dict:
         """Get a security-focused summary of the CPG."""
         sources = self.get_sources()
         sinks = self.get_sinks()
         comments = self.get_comments()
         string_concats = self.get_string_concats()
+        if flows is None:
+            flows = self.find_all_taint_flows()
 
         return {
             'total_nodes': len(self.nodes),
@@ -538,7 +567,7 @@ class CPG:
             'sinks': len(sinks),
             'comments': len(comments),
             'string_concatenations': len(string_concats),
-            'taint_flows': len(self.find_all_taint_flows()),
+            'taint_flows': len(flows),
             'functions': len(self.get_functions()),
             'high_risk': len(sources) > 0 and len(sinks) > 0,
         }
@@ -553,8 +582,8 @@ class CPGAnalyzer:
     def analyze(self, source: str, language: str, filepath: str = "") -> Dict:
         """Analyze source code using CPG and return security findings."""
         cpg = self._builder.build_from_source(source, language, filepath)
-        summary = cpg.get_security_summary()
         taint_flows = cpg.find_all_taint_flows()
+        summary = cpg.get_security_summary(taint_flows)
 
         findings = []
         for flow in taint_flows:
@@ -573,16 +602,30 @@ class CPGAnalyzer:
                 'analyzer': 'cpg',
             })
 
-        # Check for string concatenation in SQL/query contexts
+        # Check for string concatenation in SQL / path contexts only - a bare
+        # concatenation on its own is not a vulnerability (1.3: FP control).
         for concat in cpg.get_string_concats():
-            findings.append({
-                'type': 'String Concatenation in Query',
-                'severity': 'MEDIUM',
-                'line': concat.line,
-                'description': f'Potential injection via string concatenation: {concat.label[:80]}',
-                'category': 'INJECTION',
-                'analyzer': 'cpg',
-            })
+            label = concat.label or ''
+            if _SQL_CTX.search(label):
+                findings.append({
+                    'type': 'String-concatenated SQL query',
+                    'severity': 'MEDIUM',
+                    'line': concat.line,
+                    'description': 'Query text built by concatenation: '
+                                   + label[:80],
+                    'category': 'INJECTION',
+                    'analyzer': 'cpg',
+                })
+            elif _is_path_concat(label):
+                findings.append({
+                    'type': 'String-concatenated file path',
+                    'severity': 'MEDIUM',
+                    'line': concat.line,
+                    'description': 'Filesystem path built by concatenation: '
+                                   + label[:80],
+                    'category': 'TRAVERSAL',
+                    'analyzer': 'cpg',
+                })
 
         return {
             'cpg': cpg,

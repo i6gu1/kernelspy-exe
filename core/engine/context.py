@@ -132,6 +132,97 @@ def strip_comments_and_strings(content: str, ext: str) -> str:
     return ''.join(out)
 
 
+def strip_comments(content: str, ext: str) -> str:
+    """Remove comments while KEEPING string literals (newlines preserved).
+
+    Used by checks that must see the text inside a query string (PHP
+    "SELECT $id", JS "…" + x) but must never react to commented-out code.
+    Comments are replaced by spaces, everything else is kept verbatim.
+    """
+    out = []
+    i = 0
+    n = len(content)
+    in_block = False
+    quote = ''
+    triple = False
+
+    while i < n:
+        c = content[i]
+
+        if in_block:
+            if c == '*' and i + 1 < n and content[i + 1] == '/':
+                in_block = False
+                out.append('  ')
+                i += 2
+                continue
+            out.append(c if c == '\n' else ' ')
+            i += 1
+            continue
+
+        if quote:
+            out.append(c)
+            if c == '\\':
+                if i + 1 < n:
+                    out.append(content[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if triple:
+                if content[i:i + 3] == quote * 3:
+                    out.append(content[i + 1:i + 3])
+                    i += 3
+                    quote = ''
+                    triple = False
+                    continue
+            elif c == quote:
+                quote = ''
+            i += 1
+            continue
+
+        nxt = content[i + 1] if i + 1 < n else ''
+
+        if c == '#' and _is_hash_comment(ext):
+            while i < n and content[i] != '\n':
+                out.append(' ')
+                i += 1
+            continue
+        if c == '/' and nxt == '/' and _is_slash_comment(ext):
+            while i < n and content[i] != '\n':
+                out.append(' ')
+                i += 1
+            continue
+        if c == '-' and nxt == '-' and ext == '.sql':
+            while i < n and content[i] != '\n':
+                out.append(' ')
+                i += 1
+            continue
+        if c == '/' and nxt == '*' and _is_block_comment(ext):
+            in_block = True
+            out.append('  ')
+            i += 2
+            continue
+
+        # String / template literals: kept, but they stop comment scanning.
+        if c in ('"', "'"):
+            quote = c
+            triple = content[i:i + 3] == quote * 3
+            out.append(c if not triple else content[i:i + 3])
+            i += 3 if triple else 1
+            continue
+        if c == '`' and ext in BACKTICK_EXTS:
+            quote = c
+            triple = False
+            out.append(c)
+            i += 1
+            continue
+
+        out.append(c)
+        i += 1
+
+    return ''.join(out)
+
+
 def get_code_indices(lines: List[str], extension: str) -> List[int]:
     """Return indices of lines that are not pure comments.
 
