@@ -291,18 +291,22 @@ def resolve_js_dynamic_call(
 
 # sends are usually buried in a goroutine:  go func() { ch <- q }()
 _GO_SEND = re.compile(r'\b([A-Za-z_]\w*)\s*<-\s*([^;\n}]+)')
-_GO_RECV = re.compile(r'\b([A-Za-z_]\w*)\s*(?::=|=)\s*<-\s*([A-Za-z_]\w*)')
+_GO_RECV = re.compile(r'\b([A-Za-z_]\w*)\s*:=\s*<-\s*([A-Za-z_]\w*)')
+_GO_RECV_EQ = re.compile(r'\b([A-Za-z_]\w*)\s*===\s*<-\s*([A-Za-z_]\w*)')
 _GO_RANGE = re.compile(r'for\s+(?:[A-Za-z_]\w*\s*,\s*)?([A-Za-z_]\w*)\s*:?=\s*'
                        r'range\s+([A-Za-z_]\w*)')
 
 
 def go_channel_update(line: str, line_num: int, sources: Tuple,
                       tainted: Dict[str, int], tainted_channels: Dict[str, int],
-                      word_re: Callable[[str], 're.Pattern']) -> None:
+                      word_re: Callable[[str], 're.Pattern'],
+                      via_channel: Optional[Dict[str, str]] = None) -> None:
     """Propagate taint through Go channel send/receive on a single line.
 
     ``ch <- expr`` poisons the channel when ``expr`` is untrusted; ``v := <-ch``
-    (or ``for v := range ch``) hands the taint to ``v``.
+    (or ``for v := range ch``) hands the taint to ``v``.  When a
+    ``via_channel`` dict is supplied, the receiving var is mapped to the
+    channel name so findings can surface the channel flow explicitly.
     """
     m = _GO_SEND.search(line)
     if m:
@@ -324,6 +328,17 @@ def go_channel_update(line: str, line_num: int, sources: Tuple,
         var, ch = m.group(1), m.group(2)
         if ch in tainted_channels and var not in tainted:
             tainted[var] = tainted_channels[ch]
+            if via_channel is not None:
+                via_channel[var] = ch
+        return
+
+    m = _GO_RECV_EQ.search(line)
+    if m:
+        var, ch = m.group(1), m.group(2)
+        if ch in tainted_channels and var not in tainted:
+            tainted[var] = tainted_channels[ch]
+            if via_channel is not None:
+                via_channel[var] = ch
         return
 
     m = _GO_RANGE.search(line)
@@ -331,6 +346,8 @@ def go_channel_update(line: str, line_num: int, sources: Tuple,
         var, ch = m.group(1), m.group(2)
         if ch in tainted_channels and var not in tainted:
             tainted[var] = tainted_channels[ch]
+            if via_channel is not None:
+                via_channel[var] = ch
 
 
 # ═══════════════════════════════════ FINDINGS ═══════════════════════════════

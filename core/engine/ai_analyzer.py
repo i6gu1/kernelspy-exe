@@ -65,6 +65,8 @@ class AIConfig:
     provider: str = "google"  # "google" or "gguf"
     google_api_key: str = ""
     google_model: str = DEFAULT_MODEL
+    google_api_base: str = ""   # override endpoint (relay/gateway); "" = Google
+    proxy_url: str = ""         # HTTP(S) proxy, e.g. http://127.0.0.1:7890
     gguf_model_path: str = ""
     gguf_n_ctx: int = 4096
     gguf_n_threads: int = 4
@@ -127,6 +129,22 @@ Be concise, accurate, and focus on actionable security findings."""
         return key
 
     @property
+    def _base_url(self) -> str:
+        """Effective API root - custom relay/gateway or the Google default."""
+        custom = (getattr(self.config, 'google_api_base', '') or '').strip().rstrip('/')
+        if custom:
+            return custom
+        return "https://generativelanguage.googleapis.com"
+
+    def _opener(self) -> 'urllib.request.OpenerDirector':
+        """Opener that honours an explicit proxy (VPN/proxy users)."""
+        proxy = (getattr(self.config, 'proxy_url', '') or '').strip()
+        if proxy:
+            handler = urllib.request.ProxyHandler({'http': proxy, 'https': proxy})
+            return urllib.request.build_opener(handler)
+        return urllib.request.build_opener()
+
+    @property
     def available(self) -> bool:
         return bool(self.api_key)
 
@@ -138,12 +156,12 @@ Be concise, accurate, and focus on actionable security findings."""
 
     def _available_models(self) -> Optional[List[str]]:
         """generateContent-capable models this key may use (None = could not list)."""
-        url = ("https://generativelanguage.googleapis.com/v1beta/models"
+        url = (f"{self._base_url}/v1beta/models"
                "?pageSize=200")
         req = urllib.request.Request(url, method='GET',
                                      headers={'x-goog-api-key': self.api_key})
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with self._opener().open(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
             self.last_list_error = ""
         except urllib.error.HTTPError as e:
@@ -229,7 +247,7 @@ Be concise, accurate, and focus on actionable security findings."""
             for key in ('temperature', 'top_p', 'top_k'):
                 cfg.pop(key, None)
 
-        url = self.API_URL.format(model=model)
+        url = f"{self._base_url}/v1beta/models/{model}:generateContent"
 
         req = urllib.request.Request(
             url,
@@ -242,7 +260,7 @@ Be concise, accurate, and focus on actionable security findings."""
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with self._opener().open(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
 
             content = ""

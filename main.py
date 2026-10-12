@@ -7,7 +7,10 @@ import webbrowser
 from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog, Menu
-from core import Scanner, Finding, export_csv, export_html, export_json, export_sarif
+from core import (
+    Scanner, Finding, export_csv, export_html, export_json, export_sarif,
+    export_pdf,
+)
 from core.engine.ai_analyzer import AIConfig, AIResponse, ChatMessage
 from core.engine.tree_sitter_parser import is_tree_sitter_available
 from core.engine.sast_orchestrator import get_sast_orchestrator
@@ -30,7 +33,7 @@ CLR_WARNING = "#f97316"
 CLR_MEDIUM  = "#eab308"
 CLR_SUCCESS = "#22c55e"
 FOOTER_TEXT = "Programmed by The L house"
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 
 LANGS = {
     "en": {
@@ -40,6 +43,8 @@ LANGS = {
         "drag_drop": "Drag your project folder here", "or_browse": "or click to browse",
         "start_scan": "Start Scan", "scanning": "Scanning...", "clear": "Clear",
         "export_csv": "Export CSV", "export_html": "Export HTML", "export_json": "Export JSON", "export_sarif": "Export SARIF",
+        "export_pdf": "Export PDF",
+        "proxy_url": "Proxy:", "api_base": "API Base:",
         "total": "Total", "critical": "Critical", "high": "High", "medium": "Medium", "low": "Low",
         "found_issues": "issues found", "no_results": "No results yet",
         "output_dir": "Output Directory", "version": "Version",
@@ -74,6 +79,8 @@ LANGS = {
         "drag_drop": "اسحب مجلد مشروعك هنا", "or_browse": "أو اضغط للتصفح",
         "start_scan": "بدء الفحص", "scanning": "جاري الفحص...", "clear": "مسح",
         "export_csv": "تصدير CSV", "export_html": "تصدير HTML", "export_json": "تصدير JSON", "export_sarif": "تصدير SARIF",
+        "export_pdf": "تصدير PDF",
+        "proxy_url": "البروكسي:", "api_base": "عنوان API:",
         "total": "الإجمالي", "critical": "حرج", "high": "عالي", "medium": "متوسط", "low": "منخفض",
         "found_issues": "مشكلات", "no_results": "لا توجد نتائج",
         "output_dir": "مجلد الإخراج", "version": "الإصدار",
@@ -327,6 +334,8 @@ class App(ctk.CTk):
                 "ai_provider": self.ai_config.provider,
                 "google_api_key": self.ai_config.google_api_key,
                 "google_model": self.ai_config.google_model,
+                "google_api_base": self.ai_config.google_api_base,
+                "proxy_url": self.ai_config.proxy_url,
                 "gguf_model_path": self.ai_config.gguf_model_path,
                 "gguf_n_ctx": self.ai_config.gguf_n_ctx,
                 "gguf_n_threads": self.ai_config.gguf_n_threads,
@@ -353,6 +362,8 @@ class App(ctk.CTk):
                               "gemini-1.5-pro", "gemini-1.0-pro"):
                     _model = "gemini-flash-latest"
                 self.ai_config.google_model = _model
+                self.ai_config.google_api_base = data.get("google_api_base", "")
+                self.ai_config.proxy_url = data.get("proxy_url", "")
                 self.ai_config.gguf_model_path = data.get("gguf_model_path", "")
                 self.ai_config.gguf_n_ctx = data.get("gguf_n_ctx", 4096)
                 self.ai_config.gguf_n_threads = data.get("gguf_n_threads", 4)
@@ -523,6 +534,13 @@ class App(ctk.CTk):
             command=self._cancel_scan,
         )
         self.cancel_btn.pack(side="left")
+
+        ctk.CTkButton(
+            btn_row, text=self.lang["export_pdf"], font=ctk.CTkFont(size=13, weight="bold"),
+            width=140, height=42, corner_radius=10,
+            fg_color=ACCENT, hover_color=ACCENT_DIM, text_color=BG_DARK,
+            command=lambda: self._export("pdf"),
+        ).pack(side="right", padx=(0, 10))
 
         ctk.CTkButton(
             btn_row, text="EN / AR", font=ctk.CTkFont(size=14, weight="bold"),
@@ -718,6 +736,14 @@ class App(ctk.CTk):
             border_width=1, border_color="#333",
             command=lambda: self._export("sarif"),
         ).pack(side="left")
+        ctk.CTkButton(
+            btn_row, text=self.lang["export_pdf"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            width=160, height=42, corner_radius=10,
+            fg_color=ACCENT, hover_color=ACCENT_DIM,
+            text_color=BG_DARK,
+            command=lambda: self._export("pdf"),
+        ).pack(side="left", padx=(0, 10))
 
         self.report_status = ctk.CTkLabel(pg, text="", font=ctk.CTkFont(size=13),
                                            text_color=CLR_TEXT2)
@@ -806,6 +832,34 @@ class App(ctk.CTk):
         self.model_status = ctk.CTkLabel(model_row, text="", font=ctk.CTkFont(size=11),
                                          text_color=CLR_TEXT2)
         self.model_status.pack(side="left")
+
+        # Proxy + API base URL (VPN / relay users) -------------------------
+        net_row = ctk.CTkFrame(self.google_frame, fg_color="transparent")
+        net_row.pack(fill="x", padx=15, pady=(2, 4))
+
+        ctk.CTkLabel(net_row, text=self.lang.get("proxy_url", "Proxy:") + " ",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=CLR_TEXT).pack(side="left", padx=(0, 6))
+        self.proxy_entry = ctk.CTkEntry(
+            net_row, font=ctk.CTkFont(size=12), fg_color="#0a0a0a",
+            border_color="#333", text_color=CLR_TEXT, height=32, width=220,
+            placeholder_text="http://127.0.0.1:7890 (optional)")
+        self.proxy_entry.pack(side="left", padx=(0, 14))
+        if self.ai_config.proxy_url:
+            self.proxy_entry.insert(0, self.ai_config.proxy_url)
+        self._add_context_menu(self.proxy_entry)
+
+        ctk.CTkLabel(net_row, text=self.lang.get("api_base", "API Base:") + " ",
+                     font=ctk.CTkFont(size=12, weight="bold"),
+                     text_color=CLR_TEXT).pack(side="left", padx=(0, 6))
+        self.api_base_entry = ctk.CTkEntry(
+            net_row, font=ctk.CTkFont(size=12), fg_color="#0a0a0a",
+            border_color="#333", text_color=CLR_TEXT, height=32, width=260,
+            placeholder_text="https://generativelanguage.googleapis.com")
+        self.api_base_entry.pack(side="left", fill="x", expand=True)
+        if self.ai_config.google_api_base:
+            self.api_base_entry.insert(0, self.ai_config.google_api_base)
+        self._add_context_menu(self.api_base_entry)
 
         self.api_status = ctk.CTkLabel(self.google_frame, text="",
                                         font=ctk.CTkFont(size=12), height=18)
@@ -913,9 +967,20 @@ class App(ctk.CTk):
             self.google_frame.pack_forget()
             self.gguf_frame.pack(fill="x", padx=40, pady=(0, 10))
 
+    def _read_net_fields(self):
+        """Pull proxy / API-base from the AI Chat entries into ai_config."""
+        try:
+            if hasattr(self, "proxy_entry"):
+                self.ai_config.proxy_url = self.proxy_entry.get().strip()
+            if hasattr(self, "api_base_entry"):
+                self.ai_config.google_api_base = self.api_base_entry.get().strip()
+        except Exception:
+            pass
+
     def _save_api_key(self):
         key = self.api_key_entry.get().strip()
         self.ai_config.google_api_key = key
+        self._read_net_fields()
         from core.engine.ai_analyzer import get_ai_analyzer
         get_ai_analyzer().config = self.ai_config
         self._save_settings()
@@ -928,6 +993,7 @@ class App(ctk.CTk):
         """Save the key and verify it against the Google AI API (async)."""
         key = self.api_key_entry.get().strip()
         self.ai_config.google_api_key = key
+        self._read_net_fields()
         from core.engine.ai_analyzer import get_ai_analyzer
         ai = get_ai_analyzer()
         ai.config = self.ai_config
@@ -1340,6 +1406,31 @@ class App(ctk.CTk):
                        border_width=1, border_color="#333",
                        command=self._refresh_models).pack(side="left")
 
+        # Proxy + API base URL
+        snet_row = ctk.CTkFrame(ai_frame, fg_color="transparent")
+        snet_row.pack(fill="x", padx=15, pady=5)
+
+        ctk.CTkLabel(snet_row, text=self.lang.get("proxy_url", "Proxy:"),
+                     font=ctk.CTkFont(size=12),
+                     text_color=CLR_TEXT2).pack(side="left", padx=(0, 10))
+        self.settings_proxy = ctk.CTkEntry(
+            snet_row, font=ctk.CTkFont(size=12), fg_color="#0a0a0a",
+            border_color="#333", text_color=CLR_TEXT, height=32, width=200,
+            placeholder_text="http://127.0.0.1:7890")
+        self.settings_proxy.pack(side="left", padx=(0, 14))
+        if self.ai_config.proxy_url:
+            self.settings_proxy.insert(0, self.ai_config.proxy_url)
+
+        ctk.CTkLabel(snet_row, text=self.lang.get("api_base", "API Base:"),
+                     font=ctk.CTkFont(size=12),
+                     text_color=CLR_TEXT2).pack(side="left", padx=(0, 10))
+        self.settings_api_base = ctk.CTkEntry(
+            snet_row, font=ctk.CTkFont(size=12), fg_color="#0a0a0a",
+            border_color="#333", text_color=CLR_TEXT, height=32)
+        self.settings_api_base.pack(side="left", fill="x", expand=True)
+        if self.ai_config.google_api_base:
+            self.settings_api_base.insert(0, self.ai_config.google_api_base)
+
         # GGUF path
         gpath_row = ctk.CTkFrame(ai_frame, fg_color="transparent")
         gpath_row.pack(fill="x", padx=15, pady=(5, 10))
@@ -1393,6 +1484,11 @@ class App(ctk.CTk):
         self.output_dir = self.dir_entry.get().strip()
         self.ai_config.provider = self.settings_provider_var.get()
         self.ai_config.google_api_key = self.settings_api_key.get().strip()
+        try:
+            self.ai_config.proxy_url = self.settings_proxy.get().strip()
+            self.ai_config.google_api_base = self.settings_api_base.get().strip()
+        except Exception:
+            pass
         self.ai_config.gguf_model_path = self.settings_gguf_path.get().strip()
         self.scanner.use_sast = self.sast_toggle_var.get()
 
@@ -1591,6 +1687,8 @@ class App(ctk.CTk):
             ok = export_json(path, self.results)
         elif fmt == "sarif":
             ok = export_sarif(path, self.results)
+        elif fmt == "pdf":
+            ok = export_pdf(path, self.results)
         else:
             ok = False
         self.report_status.configure(

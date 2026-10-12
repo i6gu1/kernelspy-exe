@@ -110,6 +110,14 @@ def _merge(group: List[Finding]) -> Finding:
                     f"{merged.description} [also: {other.type}]"
                 )[:900]
 
+    # Taint/flow findings carry the actual data-flow identity (e.g.
+    # "Taint: cmd -> exec.Command") - keep their type in the report so the
+    # flow is not masked by a generic pattern/context type.
+    for f in group:
+        if "taint" in str(getattr(f, "analyzer", "")).lower():
+            merged.type = f.type
+            break
+
     merged.analyzer = _join_analyzers([_analyzers_of(f) for f in group])
     if not merged.remediation and hasattr(primary, "remediation"):
         merged.remediation = getattr(primary, "remediation", "")
@@ -182,6 +190,10 @@ def _merge_near(group: List[Finding]) -> Finding:
                 f"{merged.description} | Also noted: {desc}")[:900]
         if len(str(other.snippet or "")) > len(str(merged.snippet or "")):
             merged.snippet = other.snippet
+    for f in group:
+        if "taint" in str(getattr(f, "analyzer", "")).lower():
+            merged.type = f.type
+            break
     merged.analyzer = _join_analyzers([_analyzers_of(f) for f in group])
     if not merged.remediation and hasattr(primary, "remediation"):
         merged.remediation = getattr(primary, "remediation", "")

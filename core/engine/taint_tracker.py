@@ -320,6 +320,7 @@ class TaintTracker:
         # ── refinements (KernelSpy 1.4.3) ──────────────────────────────
         # Go:  ch <- tainted   poisons the channel,  v := <-ch inherits it
         tainted_channels: Dict[str, int] = {}
+        via_channel: Dict[str, str] = {}   # var -> channel it was received from
         # JS:  const h = { html: (x) => res.send(x) }  +  h[key](param)
         obj_handlers: Dict[str, Dict[str, str]] = {}
         js_consts: Dict[str, str] = {}
@@ -339,19 +340,36 @@ class TaintTracker:
                 return
             used_keys.add(key)
             source_line = tainted.get(var, line_num)
-            findings.append(Finding(
-                file=filepath,
-                line=line_num,
-                type=f"Taint: {var} -> {sink_label}",
-                severity=severity,
-                snippet=snippet,
-                description=(
-                    f"Taint flow: untrusted value '{var}' (line {source_line}) "
-                    f"reaches dangerous sink '{sink_label}' (line {line_num})."
-                ),
-                category="INJECTION",
-                analyzer="taint",
-            ))
+            chan = via_channel.get(var, "")
+            if chan:
+                findings.append(Finding(
+                    file=filepath,
+                    line=line_num,
+                    type=f"Taint via channel '{chan}': {var} -> {sink_label}",
+                    severity=severity,
+                    snippet=snippet,
+                    description=(
+                        f"Taint flow through Go channel '{chan}': untrusted "
+                        f"value '{var}' (line {source_line}) reaches dangerous "
+                        f"sink '{sink_label}' (line {line_num})."
+                    ),
+                    category="INJECTION",
+                    analyzer="taint",
+                ))
+            else:
+                findings.append(Finding(
+                    file=filepath,
+                    line=line_num,
+                    type=f"Taint: {var} -> {sink_label}",
+                    severity=severity,
+                    snippet=snippet,
+                    description=(
+                        f"Taint flow: untrusted value '{var}' (line {source_line}) "
+                        f"reaches dangerous sink '{sink_label}' (line {line_num})."
+                    ),
+                    category="INJECTION",
+                    analyzer="taint",
+                ))
 
         for idx, raw in enumerate(content.split('\n')):
             line = raw.strip()
@@ -366,7 +384,8 @@ class TaintTracker:
             if ext == '.go':
                 before = len(tainted)
                 go_channel_update(line, line_num, sources, tainted,
-                                  tainted_channels, self._word_re_for)
+                                  tainted_channels, self._word_re_for,
+                                  via_channel)
                 if len(tainted) != before:
                     tainted_here = [v for v in tainted if v in line]
 

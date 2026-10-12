@@ -17,3 +17,7 @@ __all__ = [
     "SASTOrchestrator", "get_sast_orchestrator",
     "AIAnalyzer", "AIConfig", "get_ai_analyzer",
 ]
+
+from .reporting import export_pdf
+
+__all__ += ["export_pdf"]

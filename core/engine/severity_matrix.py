@@ -177,7 +177,7 @@ def apply_severity_matrix(findings: List[Finding],
             new_sev = verdict["severity"]
         f.severity = new_sev
 
-        if verdict.get("type") and new_sev == "CRITICAL":
+        if verdict.get("type") and new_sev == "CRITICAL" and not is_taint:
             f.type = verdict["type"]
         if verdict.get("category"):
             f.category = verdict["category"]

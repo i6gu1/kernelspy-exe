@@ -6,7 +6,7 @@
 
 ### Advanced Code Security Scanner — SAST Engines, Taint Tracking & AI Analysis
 
-![Version](https://img.shields.io/badge/version-1.4.3-0ea5e9?style=flat&logo=github)
+![Version](https://img.shields.io/badge/version-1.4.4-0ea5e9?style=flat&logo=github)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776ab?style=flat&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat&logo=opensourceinitiative&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat&logo=windows&logoColor=white)
@@ -25,7 +25,7 @@ across 30+ programming languages — with a modern dark UI in English and Arabic
 ## Table of Contents
 
 - [Highlights](#highlights)
-- [What's New in 1.4.3](#whats-new-in-143)
+- [What's New in 1.4.4](#whats-new-in-144)
 - [Detection Engines](#detection-engines)
 - [Architecture](#architecture)
 - [Installation](#installation)
@@ -54,63 +54,35 @@ across 30+ programming languages — with a modern dark UI in English and Arabic
 
 ---
 
-## What's New in 1.4.3
+## What's New in 1.4.4
 
-### Go — Tainted Channel Tracking
+### Go — Channel Taint Findings No Longer Masked
 
-A value pushed into a channel keeps its taint, and every receiver inherits it:
+Channel flows were detected but then **merged away** by the severity matrix
+and dedup layer, so the report showed only a generic pattern record. The
+matrix and dedup now preserve the taint type, and the channel name is part
+of the finding:
 
 ```go
 ch := make(chan string)
 go func() { ch <- r.URL.Query().Get("q") }()   // channel becomes tainted
 v := <-ch                                      // v inherits the taint
-db.Query("SELECT " + v)                        // CRITICAL: Taint v -> sql.Query
+db.Query("SELECT " + v)                        // CRITICAL: Taint via channel 'ch': v -> sql.Query
 ```
 
-`for v := range ch` over a poisoned channel is tracked the same way.
+### AI — Proxy & API Base URL Override
 
-### Node.js — Object Reference Tracking
+VPN and relay users can now route Gemini traffic through their own endpoint.
+Two optional fields on the **AI Chat** and **Settings** pages:
 
-Handler tables are remembered while parsing, so an indirect call resolves to
-the real sink before the taint check:
+- **Proxy** — e.g. `http://127.0.0.1:7890` (honoured for every API call)
+- **API Base** — point at a compatible relay/gateway instead of Google
 
-```js
-const renderHandlers = { html: (x) => res.send(x) };
-const key = "html";                 // constant folding included
-renderHandlers[key](req.query.t);   // resolves to res.send(tainted)
-```
+### Export — Real PDF Reports
 
-Result: `ObjRef: renderHandlers['html'] -> res.send`. Folded keys such as
-`"ex" + "ec"` resolve to `child_process.exec` as well.
-
-### Python — Constant Folding & Propagation
-
-String concatenation is folded while the AST is scanned, and the folded value
-unlocks dynamic dispatch:
-
-```python
-part1 = "ev"
-part2 = "al"
-name = part1 + part2                # folds to "eval"
-globals()[name](...)                # CRITICAL: ConstFold -> eval
-getattr(os, "os" + ".system")       # CRITICAL: ConstFold -> os.system
-```
-
-`globals().get("join")` and other harmless lookups stay quiet.
-
-### AI — Honest Error Reporting
-
-Google answers region blocks with *"User location is not supported"*. That
-string used to be mistaken for a bad model name, which burned every fallback
-and ended with a misleading *"model X is not available for this API key"*.
-The app now detects the geography block and tells you to use a VPN or a local
-GGUF model instead.
-
-### Design
-
-- New application icon (shield + magnifier)
-- Model dropdowns resync automatically after a fallback reply
-- Bounded AI chat history — no more HTTP 400 on long conversations
+A dependency-free multi-page PDF generator (Helvetica, landscape) is now
+built in. **Export PDF** buttons appear on the **Scan** and **Reports**
+pages next to the existing CSV / HTML / JSON / SARIF options.
 
 ---
 
@@ -158,10 +130,10 @@ kernelspy-exe/
 │   │   └── ai_analyzer.py          # AI integration (Gemini + GGUF)
 │   ├── analyzers/                  # Per-language analyzers
 │   ├── rules/                      # Security rules + remediation data
-│   └── reporting/                  # CSV / HTML / JSON / SARIF
+│   └── reporting/                  # CSV / HTML / JSON / SARIF / PDF
 ├── main.py                         # GUI application
 ├── KernelSpy Scanner.spec          # PyInstaller configuration
-└── KernelSpy_pro_1.4.3.iss         # Inno Setup installer script
+└── KernelSpy_pro_1.4.4.iss         # Inno Setup installer script
 ```
 
 ---
@@ -170,7 +142,7 @@ kernelspy-exe/
 
 ### Option 1 — Installer (recommended)
 
-Download `KernelSpy_Scanner_Setup_PRO_1.4.3_MultiLang.exe` from
+Download `KernelSpy_Scanner_Setup_PRO_1.4.4_MultiLang.exe` from
 [kernelspy.duckdns.org](https://kernelspy.duckdns.org), run it, and you get:
 
 - Per-user install (no admin rights required)
@@ -202,7 +174,7 @@ pyinstaller "KernelSpy Scanner.spec"
 2. Drop a project folder on the home page (or press **Start Scan**)
 3. Watch findings stream into the results table with live severity counts
 4. Open a finding for its explanation and ready-to-paste fix code
-5. Export **CSV / HTML / JSON / SARIF**
+5. Export **CSV / HTML / JSON / SARIF / PDF**
 
 Command line and Explorer integration:
 
@@ -267,6 +239,7 @@ installed on PATH).
 | HTML | `.html` | Self-contained dark report |
 | JSON | `.json` | Structured, machine readable |
 | SARIF | `.sarif` | GitHub / Microsoft compatible |
+| PDF | `.pdf` | Multi-page printable report |
 
 ---
 
@@ -289,6 +262,9 @@ Settings live in `~/.kernelspy_settings.json` (never committed):
   "output_dir": "~/KernelSpy_Output",
   "ai_provider": "google",
   "google_api_key": "<your-key-here>",
+  "google_model": "gemini-flash-latest",
+  "google_api_base": "",
+  "proxy_url": "",
   "gguf_model_path": "path/to/model.gguf",
   "use_sast": false
 }
@@ -309,8 +285,8 @@ pip install pyinstaller customtkinter
 pyinstaller "KernelSpy Scanner.spec" --noconfirm --clean
 
 # 2. build the installer
-ISCC.exe KernelSpy_pro_1.4.3.iss
-# result: installer/KernelSpy_Scanner_Setup_PRO_1.4.3_MultiLang.exe
+ISCC.exe KernelSpy_pro_1.4.4.iss
+# result: installer/KernelSpy_Scanner_Setup_PRO_1.4.4_MultiLang.exe
 ```
 
 Run the regression matrix before releasing:

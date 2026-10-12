@@ -115,8 +115,25 @@ class PythonASTAnalyzer:
                   and self._call_is(node, 'getattr')
                   and len(node.args) >= 2):
                 key, var, src_line = self._fold_operand(node.args[1], consts, def_lines)
+                obj_name = self._dotted_name(node.args[0])
+                # getattr(os, "sys" + "tem") folds to "system" - prefix the
+                # object so it resolves against the full "os.system" entry.
+                if key and obj_name and f"{obj_name}.{key}" in PY_DANGEROUS:
+                    key = f"{obj_name}.{key}"
+                label = f"getattr({obj_name or 'obj'}, {var or '?'})"
                 self._emit_fold(filepath, node, key, var, src_line, findings,
-                                seen, f"getattr(obj, {var or '?'})")
+                                seen, label)
+
+    @staticmethod
+    def _dotted_name(node) -> str:
+        """Source-level dotted name for a Name/Attribute chain ('os.path')."""
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+        return ".".join(reversed(parts))
 
     def _emit_fold(self, filepath, node, key, var, src_line,
                    findings, seen, expr_text: str):
