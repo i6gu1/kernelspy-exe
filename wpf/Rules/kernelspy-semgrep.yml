@@ -1,0 +1,57 @@
+rules:
+  - id: kernelspy-sql-injection-concat
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential SQL injection via dynamic query construction.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute("..." + $X)
+          - pattern: $DB.execute(f"...{$X}...")
+          - pattern: $DB.query(`...${$X}...`)
+          - pattern: $DB.raw("..." + $X)
+
+  - id: kernelspy-command-injection
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential OS command injection through shell execution.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: os.system("..." + $X)
+          - pattern: subprocess.call("..." + $X, shell=True)
+          - pattern: Runtime.getRuntime().exec("..." + $X)
+          - pattern: Process.Start("..." + $X)
+          - pattern: eval($X)
+
+  - id: kernelspy-hardcoded-secret
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Possible hardcoded credential or API secret.
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: $KEY = "..."
+          - pattern: $KEY = '...'
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(password|secret|api_?key|token|credential).*
+
+  - id: kernelspy-weak-crypto
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Weak cryptographic algorithm detected (MD5/SHA1).
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - pattern: MessageDigest.getInstance("MD5")
+          - pattern: MessageDigest.getInstance("SHA-1")
+          - pattern: MD5.Create()
+
+  - id: kernelspy-path-traversal
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential path traversal through unsanitized file path.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: open("..." + $X)
+          - pattern: File.ReadAllText("..." + $X)
+          - pattern: fs.readFileSync("..." + $X)

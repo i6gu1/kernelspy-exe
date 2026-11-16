@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+publish/
+installer/
+_t/
+
+# The bundled analyser payload is ~1 GB and is distributed separately.
+# Keep the directory and its instructions visible, but never commit the binaries.
+tools/*
+!tools/README.md
+
+# Logs and scratch files
+*.log
+*.err
+out.txt
+err.txt
