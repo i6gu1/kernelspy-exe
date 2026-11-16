@@ -6,8 +6,8 @@ files**, which is far beyond what GitHub can reasonably host in a source
 repository.
 
 The application resolves this folder relative to the executable (and its parent
-folders), so placing it at `wpf/tools/` is enough for both `dotnet run` and a
-published build.
+folders), so placing it at `tools/` in the repository root is enough for both
+`dotnet run` and a published build.
 
 ## Required layout
 

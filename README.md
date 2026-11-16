@@ -1,136 +1,151 @@
-<div align="center">
+# KernelSpy Scanner - C# / WPF Edition
 
-# KernelSpy Scanner
+A complete Windows rewrite of the KernelSpy security scanner using **C# 13**,
+**.NET 9**, and **WPF**. The application keeps the original layered detection
+approach and adds **ESLint** and **Semgrep** analysers, merging everything into
+one deduplicated result set.
 
-### Offline security scanning for Windows
+![KernelSpy Scanner home](docs/screenshot-home.png)
 
-![Version](https://img.shields.io/badge/version-1.4.4-0ea5e9?style=flat)
-![.NET](https://img.shields.io/badge/.NET-9.0-512bd4?style=flat&logo=dotnet&logoColor=white)
-![C#](https://img.shields.io/badge/C%23-13-239120?style=flat&logo=csharp&logoColor=white)
-![WPF](https://img.shields.io/badge/UI-WPF-0ea5e9?style=flat)
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4?style=flat&logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/license-MIT-22c55e?style=flat)
-
-**A fast, fully offline SAST desktop scanner with a native dark WPF interface,
-built-in pattern detection, ESLint, and Semgrep.**
-
-</div>
-
----
-
-## Overview
-
-KernelSpy Scanner reads a source tree, applies layered detection rules, and
-merges the results of the built-in engine with **ESLint** and **Semgrep** into a
-single deduplicated findings view. It is designed for Windows, works without an
-internet connection, and can be published with the complete .NET runtime and
-all analyser binaries beside the executable.
-
-The current Windows application is the **C# 13 / .NET 9 / WPF** edition in
-[`wpf/`](wpf/). The original Python implementation is still in this repository.
-
-![KernelSpy Scanner](wpf/docs/screenshot-home.png)
+![KernelSpy Scanner results](docs/screenshot-results.png)
 
 ## Highlights
 
-- Deep-black UI, including the title bar, scrollbars, tables, and progress bar.
+- Deep-black WPF interface with a dark title bar, scrollbars, and data grid.
 - Asynchronous scanning with live progress and cancellation.
-- Pattern engine for injection, XSS, traversal, secrets, weak crypto, SSRF,
-  XXE, unsafe deserialization, and framework misconfigurations.
-- Inline suppressions (`kernelspy-ignore`) and sanitizer/placeholder filters.
-- ESLint analysis for JavaScript and TypeScript using bundled Node.js.
-- Semgrep analysis using a bundled native core and `Rules/kernelspy-semgrep.yml`.
+- Built-in pattern engine covering injection, XSS, path traversal, secrets,
+  weak cryptography, SSRF, XXE, and related classes of issues.
+- Inline suppression comments (`kernelspy-ignore`) and sanitizer/placeholder
+  filtering.
+- ESLint integration for JavaScript and TypeScript.
+- Semgrep integration through the bundled native `semgrep-core.exe` and the
+  project rule pack in `Rules/kernelspy-semgrep.yml`.
 - HTML and JSON report export.
-- Self-contained `win-x64` deployment with no runtime downloads.
-- Diagnostics and crash logs under `%LOCALAPPDATA%\KernelSpyScanner\logs`.
+- Fully self-contained `win-x64` publishing: the .NET runtime, Node.js, ESLint,
+  Semgrep, and rules travel with the application.
+- Global crash logging and startup diagnostics under
+  `%LOCALAPPDATA%\KernelSpyScanner\logs`.
 
-## Repository layout
+## Requirements
 
-| Path | Contents |
-|:--|:--|
-| [`wpf/`](wpf/) | Current C# / WPF application and its documentation |
-| [`wpf/README.md`](wpf/README.md) | Build, run, packaging, and architecture details |
-| [`wpf/KernelSpy_Scanner_WPF.iss`](wpf/KernelSpy_Scanner_WPF.iss) | Inno Setup installer definition |
-| [`wpf/build-installer.ps1`](wpf/build-installer.ps1) | Publish, verify, and build the installer |
-| [`main.py`](main.py), [`core/`](core/) | Original Python edition |
-| [`docs/python-edition.md`](docs/python-edition.md) | Preserved Python edition README |
-| `KernelSpy*.iss` | Installer definitions for the Python edition |
+- Windows 10 or later, 64-bit.
+- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) to build from
+  source.
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) to create the installer.
+- A prepared `tools/` payload for the bundled ESLint and Semgrep analysers. See
+  [`tools/README.md`](tools/README.md) for the exact layout. The payload is not
+  committed because it is about 1 GB.
 
-## Build the WPF edition
+The published application does **not** require the .NET Desktop Runtime or any
+separate Node.js / Python / Semgrep installation on the target machine.
 
-Requirements:
+## Build and run
 
-- Windows 10 or later, 64-bit
-- [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0)
-- [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer
-- The prepared analyser payload under `wpf/tools/`
+From the repository root:
 
 ```powershell
-cd wpf
-
 dotnet restore
 dotnet build -c Release
 dotnet run -c Release
 ```
 
-To create a self-contained publish and the installer:
+Select a source folder on the **Scan** page, press **Start Scan**, then open
+**Results**. Reports can be exported from the **Reports** page.
+
+## Publish
+
+```powershell
+dotnet publish KernelSpyScanner.csproj -c Release -r win-x64 `
+  --self-contained true -p:PublishSingleFile=false -p:PublishTrimmed=false `
+  -o publish
+```
+
+The project is intentionally published as a folder rather than a single file:
+the bundled tools payload is much larger than a practical single-file bundle,
+and the application resolves `tools/` relative to the real executable
+directory.
+
+## Installer
 
 ```powershell
 ./build-installer.ps1
 ```
 
-The setup is written to
-`wpf/installer/KernelSpy_Scanner_Setup_WPF_1.4.4.exe`. The build script verifies
-the bundled runtime and analyser paths before it invokes Inno Setup, and it only
-publishes the setup after a successful compile.
+The script:
 
-## Bundled tools payload
+1. Publishes a self-contained `win-x64` build into `publish/`.
+2. Verifies that the runtime, rules, Node.js, ESLint, and Semgrep core are
+   present.
+3. Compiles `KernelSpy_Scanner_WPF.iss` with Inno Setup into a staging folder.
+4. Copies the finished setup to
+   `installer/KernelSpy_Scanner_Setup_WPF_1.4.4.exe` only after a successful
+   compile, so an interrupted build cannot leave a truncated installer.
 
-The `tools/` directory is **not committed**. It contains about **1.04 GB across
-21,385 files**, which is unsuitable for a Git source repository. The application
-expects this layout beside the executable:
+The setup is large because it contains the complete standalone payload
+(roughly 1.2 GB installed). Compile and install times depend heavily on disk
+speed and real-time antivirus scanning.
+
+## Bundled tools
+
+The scanner never downloads tools at runtime. At startup it looks for `tools/`
+next to the executable and in parent directories.
+
+| Tool | Expected path |
+|:--|:--|
+| Node.js | `tools/node/node.exe` |
+| ESLint | `tools/eslint-10.13.0/eslint-10.13.0/bin/eslint.js` |
+| Semgrep core | `tools/semgrep-runtime/semgrep/bin/semgrep-core.exe` |
+| Semgrep source | `tools/semgrep-1.181.0/` |
+| Semgrep rules | `Rules/kernelspy-semgrep.yml` |
+
+If one of the optional external analysers is missing, the built-in engine still
+runs and the skipped analyser is reported in the UI.
+
+## Project structure
 
 ```text
-tools/
-  node/node.exe
-  eslint-10.13.0/eslint-10.13.0/bin/eslint.js
-  semgrep-runtime/semgrep/bin/semgrep-core.exe
-  semgrep-1.181.0/
+KernelSpyScanner.csproj          WPF application project (.NET 9, win-x64)
+App.xaml / App.xaml.cs           Bootstrap, theme loading, crash logging
+MainWindow.xaml / .cs            Shell, scan, results, reports, settings
+Themes/DarkTheme.xaml            Dark design system and control templates
+Models/Finding.cs                Finding model
+Engine/AppPaths.cs               Dynamic bundled-resource resolution
+Engine/Patterns.cs               Built-in detection rules
+Engine/Scanner.cs                Async scan orchestration and deduplication
+Integrations/EslintRunner.cs     Bundled Node.js + ESLint adapter
+Integrations/SemgrepRunner.cs    Native Semgrep core adapter
+Reporting/HtmlReport.cs          Styled HTML export
+Reporting/JsonReport.cs          Structured JSON export
+Rules/kernelspy-semgrep.yml      Semgrep rule pack
+Rules/eslint.config.mjs          ESLint flat configuration
+KernelSpy_Scanner_WPF.iss        Inno Setup definition
+build-installer.ps1              Publish + verify + installer build
+tools/README.md                  Instructions for the external tools payload
+docs/                            Screenshots used by this README
 ```
 
-Full instructions are in [`wpf/tools/README.md`](wpf/tools/README.md). The
-application resolves the folder relative to the executable and its parents, so
-running from `wpf/` picks up `wpf/tools/` automatically. If an external analyser
-is missing, the built-in scanner still runs and reports the analyser as skipped.
+## Detection coverage
 
-## Reports
+The built-in engine includes rules for:
 
-Findings can be exported from the **Reports** page as:
+- code execution and dangerous `eval` / command execution
+- SQL injection, NoSQL injection, and LDAP injection
+- cross-site scripting and unsafe HTML rendering
+- path traversal and unrestricted file access
+- hardcoded secrets, API keys, tokens, and private keys
+- weak hashing, weak ciphers, and insecure random generation
+- SSRF, XXE, unsafe deserialization, and permissive CORS
+- debug flags, verbose errors, and common framework misconfigurations
 
-- **HTML** — styled, self-contained report with encoded source snippets.
-- **JSON** — structured data for further processing or dashboards.
+ESLint contributes JavaScript/TypeScript lint findings. Semgrep contributes the
+rules in `Rules/kernelspy-semgrep.yml`, including dangerous eval and command
+injection patterns.
 
-## Python edition
+## Security notes
 
-The original Python scanner remains available:
-
-```powershell
-pip install -r requirements.txt
-python main.py
-```
-
-Its full documentation is preserved in
-[`docs/python-edition.md`](docs/python-edition.md). The Python installer
-definitions are the `KernelSpy*.iss` files at the repository root.
-
-## Contributing
-
-Issues and pull requests are welcome. For the WPF application, please include:
-
-- Windows version and architecture
-- The .NET SDK version used to build
-- The affected page or analyser (built-in, ESLint, or Semgrep)
-- Relevant lines from `%LOCALAPPDATA%\KernelSpyScanner\logs`
+The scanner is defensive tooling. It never executes the source code it scans.
+It only reads text files and invokes the external analysers in read-only modes.
+Source snippets are HTML-encoded before being written to reports.
 
 ## License
 
