@@ -9,7 +9,7 @@
     <AssemblyName>KernelSpy Scanner</AssemblyName>
     <RootNamespace>KernelSpyScanner</RootNamespace>
     <ApplicationIcon>icon.ico</ApplicationIcon>
-    <Version>1.4.4</Version>
+    <Version>1.4.5</Version>
     <Company>The L house</Company>
     <Product>KernelSpy Scanner</Product>
     <Description>KernelSpy security scanner - C# WPF edition</Description>

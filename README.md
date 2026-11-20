@@ -26,6 +26,21 @@ one deduplicated result set.
 - Global crash logging and startup diagnostics under
   `%LOCALAPPDATA%\KernelSpyScanner\logs`.
 
+## Detection fixes in 1.4.5
+
+This release focuses on detection quality:
+
+- Dangerous-looking tokens inside comments, docstrings and benign examples no
+  longer produce alerts.
+- Findings from the built-in engine, ESLint and Semgrep are merged by file, line
+  and issue type, so the same vulnerability is not reported two or three times.
+- Configuration files (`.yaml`, `.yml`, `.json`, `.toml`, `.ini`, `.env`) are now
+  scanned for hardcoded credentials, and files up to 10 MB are no longer skipped.
+- Added checks for XXE, open redirects, DOM XSS sinks, SSRF, unsafe YAML/Pickle
+  deserialization and simple SQL query-dataflow.
+- ESLint now uses the shipped security configuration instead of a reduced
+  inline rule set, and the Semgrep rule pack is validated during development.
+
 ## Requirements
 
 - Windows 10 or later, 64-bit.
@@ -78,7 +93,7 @@ The script:
    present.
 3. Compiles `KernelSpy_Scanner_WPF.iss` with Inno Setup into a staging folder.
 4. Copies the finished setup to
-   `installer/KernelSpy_Scanner_Setup_WPF_1.4.4.exe` only after a successful
+   `installer/KernelSpy_Scanner_Setup_WPF_1.4.5.exe` only after a successful
    compile, so an interrupted build cannot leave a truncated installer.
 
 The setup is large because it contains the complete standalone payload

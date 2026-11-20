@@ -80,13 +80,7 @@ namespace KernelSpyScanner.Integrations
             [".vue"] = "vue",
         };
 
-        private static readonly HashSet<string> IgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ".git", ".svn", "node_modules", "bin", "obj", "dist", "build", "__pycache__",
-            ".venv", "venv", ".idea", ".vs", "packages", "vendor", "tools"
-        };
-
-        private const int MaxTargets = 20000;
+        private const int MaxTargets = 100_000;
 
         private const string PysemgrepEntry =
             "-c \"from semgrep.console_scripts.pysemgrep import main; main()\"";
@@ -188,6 +182,7 @@ namespace KernelSpyScanner.Integrations
                     foreach (var r in res.EnumerateArray())
                     {
                         string path = r.TryGetProperty("path", out var p) ? p.GetString() ?? folder : folder;
+                        path = NormalizeReportedPath(path, folder);
                         int line = 0;
                         if (r.TryGetProperty("start", out var st) && st.TryGetProperty("line", out var ln))
                             line = ln.GetInt32();
@@ -331,7 +326,7 @@ namespace KernelSpyScanner.Integrations
         {
             var targets = new List<SemgrepTarget>();
 
-            foreach (var file in EnumerateSourceFiles(folder))
+            foreach (var file in SourceFiles.Enumerate(folder))
             {
                 ct.ThrowIfCancellationRequested();
 
@@ -387,40 +382,20 @@ namespace KernelSpyScanner.Integrations
             return targetsPath;
         }
 
-        private static IEnumerable<string> EnumerateSourceFiles(string root)
+        /// <summary>
+        /// semgrep-core reports the synthetic ppath from the targets file
+        /// (/src/file.py). Convert it back to a real filesystem path so dedup
+        /// and report snippets work on the actual file.
+        /// </summary>
+        private static string NormalizeReportedPath(string path, string root)
         {
-            var stack = new Stack<string>();
-            stack.Push(root);
+            if (string.IsNullOrWhiteSpace(path)) return root;
+            if (!path.StartsWith('/') && !path.StartsWith('\\'))
+                return path;
 
-            while (stack.Count > 0)
-            {
-                var dir = stack.Pop();
-
-                string[] files;
-                try { files = Directory.GetFiles(dir); }
-                catch { continue; }
-
-                foreach (var file in files)
-                    yield return file;
-
-                string[] subDirs;
-                try { subDirs = Directory.GetDirectories(dir); }
-                catch { continue; }
-
-                foreach (var sub in subDirs)
-                {
-                    var name = Path.GetFileName(sub);
-                    if (IgnoredDirectories.Contains(name)) continue;
-
-                    try
-                    {
-                        if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
-                    }
-                    catch { continue; }
-
-                    stack.Push(sub);
-                }
-            }
+            var relative = path.TrimStart('/', '\\').Replace('/', Path.DirectorySeparatorChar);
+            try { return Path.GetFullPath(Path.Combine(root, relative)); }
+            catch { return path; }
         }
 
         private static string TryReadLine(string path, int line)

@@ -9,6 +9,10 @@ rules:
           - pattern: $DB.execute(f"...{$X}...")
           - pattern: $DB.query(`...${$X}...`)
           - pattern: $DB.raw("..." + $X)
+          - pattern: $DB.execute($QUERY)
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: (?i)(query|sql|statement)
 
   - id: kernelspy-command-injection
     languages: [python, javascript, typescript, java, csharp, php, ruby, go]
@@ -22,6 +26,17 @@ rules:
           - pattern: Process.Start("..." + $X)
           - pattern: eval($X)
 
+  - id: kernelspy-xss-dom-sink
+    languages: [javascript, typescript]
+    message: "Potential DOM XSS: untrusted value written to an HTML sink."
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $X
+          - pattern: $EL.outerHTML = $X
+          - pattern: document.write($X)
+          - pattern: $EL.insertAdjacentHTML($POS, $X)
+
   - id: kernelspy-hardcoded-secret
     languages: [python, javascript, typescript, java, csharp, php, ruby, go]
     message: Possible hardcoded credential or API secret.
@@ -30,6 +45,16 @@ rules:
       - pattern-either:
           - pattern: $KEY = "..."
           - pattern: $KEY = '...'
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(password|secret|api_?key|token|credential).*
+
+  - id: kernelspy-config-secret
+    languages: [yaml, json]
+    message: Possible credential stored in configuration.
+    severity: WARNING
+    patterns:
+      - pattern: "$KEY: $VALUE"
       - metavariable-regex:
           metavariable: $KEY
           regex: (?i).*(password|secret|api_?key|token|credential).*
@@ -55,3 +80,58 @@ rules:
           - pattern: open("..." + $X)
           - pattern: File.ReadAllText("..." + $X)
           - pattern: fs.readFileSync("..." + $X)
+
+  - id: kernelspy-ssrf-user-input
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: "Potential SSRF: request target derived from user-controlled input."
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL)
+          - pattern: requests.post($URL)
+          - pattern: fetch($URL)
+          - pattern: urllib.request.urlopen($URL)
+      - metavariable-regex:
+          metavariable: $URL
+          regex: (?i).*(user|input|param|query|target|url|href).*
+
+  - id: kernelspy-xxe
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential XML external entity (XXE) processing.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: DtdProcessing.Parse
+          - pattern: resolve_entities=True
+          - pattern: XmlResolver = $X
+          - pattern: libxml_disable_entity_loader(false)
+
+  - id: kernelspy-insecure-deserialization
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential insecure deserialization of untrusted data.
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads($X)
+          - pattern: yaml.load($X)
+          - pattern: unserialize($X)
+
+  - id: kernelspy-insecure-deserialization-csharp
+    languages: [csharp]
+    message: Potential insecure deserialization of untrusted data.
+    severity: ERROR
+    patterns:
+      - pattern: new BinaryFormatter()
+
+  - id: kernelspy-open-redirect
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: Potential open redirect using user-controlled target.
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: Response.Redirect($URL)
+          - pattern: window.location = $URL
+          - pattern: location.href = $URL
+      - metavariable-regex:
+          metavariable: $URL
+          regex: (?i).*(user|input|param|query|request|req).*

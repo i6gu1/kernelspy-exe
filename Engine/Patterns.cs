@@ -4,6 +4,14 @@ using System.Text.RegularExpressions;
 
 namespace KernelSpyScanner.Engine
 {
+    /// <summary>Which files a rule is allowed to run against.</summary>
+    public enum RuleScope
+    {
+        All,
+        Code,
+        Config
+    }
+
     /// <summary>
     /// A single regex-based detection rule used by the core engine.
     /// </summary>
@@ -13,77 +21,91 @@ namespace KernelSpyScanner.Engine
         public string Category { get; }
         public string Severity { get; }
         public Regex Regex { get; }
+        public RuleScope Scope { get; }
 
         public PatternRule(string name, string category, string severity, string pattern,
-                           RegexOptions options = RegexOptions.IgnoreCase | RegexOptions.Compiled)
+                           RegexOptions options = RegexOptions.IgnoreCase | RegexOptions.Compiled,
+                           RuleScope scope = RuleScope.All)
         {
             Name = name;
             Category = category;
             Severity = severity;
             Regex = new Regex(pattern, options);
+            Scope = scope;
         }
     }
 
     /// <summary>
-    /// Central registry of detection rules. Mirrors the spirit of the Python
-    /// pattern/lexer analyzers while staying lightweight and dependency-free.
+    /// Central registry of detection rules. Code rules run on text with
+    /// comments masked; credential rules also run on configuration files.
     /// </summary>
     public static class Patterns
     {
+        private const RegexOptions Options = RegexOptions.IgnoreCase | RegexOptions.Compiled;
+        private const RegexOptions MultiLineOptions = Options | RegexOptions.Multiline;
+
         public static readonly List<PatternRule> Rules = new()
         {
-            // SQL Injection - only flag dynamic SQL construction, not every '+'
+            // ---- Injection -------------------------------------------------
             new("SQL Injection (dynamic query)", "INJECTION", "HIGH",
-                @"(?i)(execute|executemany|query|raw)\s*\(\s*(['""][^'""]*['""]\s*\+|f['""]|`|.*\$\{)"),
+                @"\b(execute|executemany|query|raw)\s*\(\s*(['""]?[^)'""]*['""]?\s*\+|f['""]|`|[^)\n]*\$\{)", Options, RuleScope.Code),
 
             new("SQL Injection (concatenated statement)", "INJECTION", "CRITICAL",
-                @"(?i)\b(select|insert|update|delete)\b[^;]{0,200}(\+\s*[A-Za-z_$]|%s|\$\{)"),
+                @"\b(select|insert|update|delete)\b[^;\n]{0,200}(\+\s*[A-Za-z_$]|%s|\$\{|\{[A-Za-z_][\w]*\})", Options, RuleScope.Code),
 
-            // OS Command Injection
             new("OS Command Injection", "INJECTION", "CRITICAL",
-                @"(?i)\b(system|popen|shell_exec|exec|Runtime\.getRuntime\(\)\.exec|Process\.Start)\s*\([^)]*(\+|%s|\$\{)"),
+                @"\b(system|popen|shell_exec|exec|execSync|spawn|Runtime\.getRuntime\(\)\.exec|Process\.Start)\s*\([^)\n]*(\+|%s|\$\{|\{[A-Za-z_][\w]*\})", Options, RuleScope.Code),
 
-            // Cross-Site Scripting
-            new("Cross-Site Scripting (XSS)", "XSS", "HIGH",
-                @"(?i)(\.innerHTML\s*=|document\.write\s*\(|Response\.Write\s*\(|dangerouslySetInnerHTML)"),
-
-            // Path Traversal
-            new("Path Traversal", "PATH_TRAVERSAL", "HIGH",
-                @"(?i)(File\.ReadAllText|File\.ReadAllBytes|open|fopen|readFileSync)\s*\([^)]*\.\."),
-
-            // Hardcoded Secrets
-            new("Hardcoded Secret", "SECRET", "HIGH",
-                @"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\b\s*[:=]\s*['""][A-Za-z0-9_\-\.]{8,}['""]"),
-
-            // SSRF
-            new("Server-Side Request Forgery (SSRF)", "SSRF", "MEDIUM",
-                @"(?i)(HttpClient|WebRequest|fetch|requests\.get|urllib\.request)\s*\([^)]*(user|input|url|param)"),
-
-            // Insecure Deserialization
-            new("Insecure Deserialization", "DESERIALIZATION", "CRITICAL",
-                @"(?i)\b(BinaryFormatter|pickle\.loads|ObjectInputStream|unserialize)\s*\("),
-
-            // Weak Cryptography
-            new("Weak Cryptography (MD5/SHA1)", "CRYPTO", "MEDIUM",
-                @"(?i)(MD5|SHA1)\.Create|MessageDigest\.getInstance\(\s*['""](MD5|SHA-1)['""]|hashlib\.(md5|sha1)\("),
-
-            // Eval / Code Execution
-            new("Dangerous Eval", "CODE_EXECUTION", "CRITICAL",
-                @"(?i)\b(eval|exec)\s*\("),
-
-            // LDAP Injection
             new("LDAP Injection", "INJECTION", "MEDIUM",
-                @"(?i)DirectorySearcher[^;]*Filter\s*=\s*[^;]*\+"),
+                @"DirectorySearcher[^;\n]*Filter\s*=\s*[^;\n]*(\+|\$|<)", Options, RuleScope.Code),
 
-            // Open redirect
+            // ---- Cross-site scripting --------------------------------------
+            new("Cross-Site Scripting (XSS)", "XSS", "HIGH",
+                @"(\.(?:inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write(?:ln)?\s*\(|Response\.Write\s*\(|dangerouslySetInnerHTML|v-html\s*=|bypassSecurityTrustHtml\s*\()", Options, RuleScope.Code),
+
+            // ---- Path traversal --------------------------------------------
+            new("Path Traversal", "PATH_TRAVERSAL", "HIGH",
+                @"\b(File\.ReadAllText|File\.ReadAllBytes|File\.OpenRead|open|fopen|readFileSync|fs\.readFile)\s*\([^)\n]*(\.\./|%2e%2e|\$\{[^}\n]*(user|input|param)|\+\s*[A-Za-z_$])", Options, RuleScope.Code),
+
+            // ---- Server-side request forgery --------------------------------
+            new("Server-Side Request Forgery (SSRF)", "SSRF", "MEDIUM",
+                @"(?<!\bdef\s)(?<!\bfunction\s)(?<!\bconst\s)(?<!\blet\s)(?<!\bvar\s)\b(fetch|axios\.(?:get|post)|requests\.(?:get|post)|urllib\.request\.urlopen|WebRequest\.Create|HttpClient\.GetAsync|http\.Get)\s*\(\s*[^)\n]*(user|input|param|query|target|url|href|link|addr)", Options, RuleScope.Code),
+
+            // ---- Deserialization -------------------------------------------
+            new("Insecure Deserialization", "DESERIALIZATION", "CRITICAL",
+                @"\b(BinaryFormatter|ObjectInputStream|XMLDecoder|pickle\.loads?|cPickle\.loads?|marshal\.loads?|yaml\.load|unserialize|readObject)\s*\(", Options, RuleScope.Code),
+
+            new("Unsafe JSON type handling", "DESERIALIZATION", "HIGH",
+                @"TypeNameHandling\s*=\s*TypeNameHandling\.All", Options, RuleScope.Code),
+
+            // ---- Cryptography ----------------------------------------------
+            new("Weak Cryptography (MD5/SHA1/DES/RC4)", "CRYPTO", "MEDIUM",
+                @"\b(MD5|SHA1|SHA-1|DES|RC4|ARC4)\.Create\s*\(|MessageDigest\.getInstance\(\s*['""](MD5|SHA-1|DES|RC4)['""]|hashlib\.(md5|sha1)\s*\(|CryptoJS\.(MD5|SHA1)\s*\(", Options, RuleScope.Code),
+
+            // ---- Code execution --------------------------------------------
+            new("Dangerous Eval", "CODE_EXECUTION", "CRITICAL",
+                @"\b(eval|exec|execScript)\s*\(|\bnew\s+Function\s*\(|\bset(?:Timeout|Interval)\s*\(\s*['""][^'""\n]*['""]", Options, RuleScope.Code),
+
+            // ---- Redirects and XML -----------------------------------------
             new("Open Redirect", "REDIRECT", "MEDIUM",
-                @"(?i)(Response\.Redirect|redirect|res\.redirect)\s*\(\s*(request|req|user|param|input)"),
+                @"\b(Response\.Redirect|redirect|res\.redirect)\s*\(\s*(request|req|user|param|input|query)|\b(?:window\.)?location(?:\.href)?\s*=\s*(?:request|req|user|param|input|query)", Options, RuleScope.Code),
 
-            // XML External Entity
             new("XML External Entity (XXE)", "XXE", "HIGH",
-                @"(?i)(XmlReaderSettings|DocumentBuilderFactory|SAXParserFactory).*setFeature\([^)]*(external|doctype)"),
+                @"DtdProcessing\s*=\s*DtdProcessing\.Parse|XmlResolver\s*=\s*new|setFeature\s*\([^)\n]*(external-general-entities|external-parameter-entities|load-external-dtd)|XMLParser\s*\([^)\n]*resolve_entities\s*=\s*True|libxml_disable_entity_loader\s*\(\s*false", Options, RuleScope.Code),
 
-            // ---- Provider / cloud credentials (ported from core/rules/secrets.py) ----
+            new("CSRF protection disabled", "CSRF", "MEDIUM",
+                @"\b(csrf|antiforgery|xsrf)[^;\n]{0,40}(disable|disabled|off|false)", Options, RuleScope.Code),
+
+            // ---- Credentials and provider tokens ---------------------------
+            new("Hardcoded Secret", "SECRET", "HIGH",
+                @"\b(password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key)\b\s*[:=]\s*['""][A-Za-z0-9_\-./+=]{8,}['""]", Options),
+
+            new("Hardcoded Secret (config value)", "SECRET", "HIGH",
+                @"^\s*['""]?(?:export\s+)?(password|passwd|pwd|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|token)\b['""]?\s*[:=]\s*['""]?[A-Za-z0-9_\-./+=]{8,}['""]?", MultiLineOptions, RuleScope.Config),
+
+            new("Bearer token in configuration", "SECRET", "HIGH",
+                @"\bAuthorization\s*[:=]\s*['""]?Bearer\s+[A-Za-z0-9_\-\.]{16,}", Options, RuleScope.Config),
+
             new("AWS Access Key", "CLOUD", "CRITICAL", @"\bAKIA[0-9A-Z]{16}\b"),
             new("Google API Key", "CLOUD", "HIGH", @"\bAIza[0-9A-Za-z\-_]{35}\b"),
             new("GitHub Token", "VCS", "CRITICAL", @"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b"),
@@ -97,22 +119,17 @@ namespace KernelSpyScanner.Engine
             new("Hugging Face Token", "AI", "HIGH", @"\bhf_[A-Za-z0-9]{34,}\b"),
             new("SendGrid Key", "EMAIL", "CRITICAL", @"\bSG\.[A-Za-z0-9\-_]{22}\.[A-Za-z0-9\-_]{43}\b"),
             new("NPM Token", "PACKAGE", "HIGH", @"\bnpm_[A-Za-z0-9]{36}\b"),
-            new("Private Key Block", "SECRET", "CRITICAL", @"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+            new("Private Key Block", "SECRET", "CRITICAL", @"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
             new("JWT Token", "SECRET", "MEDIUM", @"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b"),
             new("Database Connection String", "CREDENTIALS", "HIGH",
-                @"(?i)(mysql|postgres|postgresql|mongodb|redis|jdbc:[a-z]+)://[^:\s]+:[^@\s]+@"),
+                @"\b(mysql|postgres|postgresql|mongodb|redis|jdbc:[a-z]+)://[^:\s]+:[^@\s]+@"),
             new("Azure Storage Key", "CLOUD", "CRITICAL",
-                @"(?i)DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{40,}"),
+                @"DefaultEndpointsProtocol=https;AccountName=[^;]+;AccountKey=[A-Za-z0-9+/=]{40,}"),
         };
 
         /// <summary>
-        /// File extensions considered scannable source code.
+        /// Kept for callers that only need the set of scannable extensions.
         /// </summary>
-        public static readonly HashSet<string> ScannableExtensions = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ".cs", ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs",
-            ".cpp", ".c", ".h", ".hpp", ".php", ".rb", ".kt", ".swift", ".dart",
-            ".lua", ".pl", ".scala", ".groovy", ".sql", ".sh", ".ps1"
-        };
+        public static HashSet<string> ScannableExtensions => SourceFiles.AllExtensions;
     }
 }

@@ -25,9 +25,12 @@ namespace KernelSpyScanner.Integrations
     /// </summary>
     public static class EslintRunner
     {
+        // Fallback used only when the bundled flat config is unavailable.
+        // The bundled Rules/eslint.config.mjs is preferred because it also
+        // detects unsafe DOM sinks such as innerHTML and document.write.
         private const string RulesJson =
             "{\"no-eval\":\"error\",\"no-implied-eval\":\"error\",\"no-new-func\":\"error\"," +
-            "\"no-script-url\":\"error\",\"no-prototype-builtins\":\"warn\"}";
+            "\"no-script-url\":\"error\"}";
 
         public static async Task<List<Finding>> RunAsync(string folder, CancellationToken ct)
         {
@@ -41,8 +44,16 @@ namespace KernelSpyScanner.Integrations
             if (string.IsNullOrEmpty(nodeExe))
                 throw new FileNotFoundException("Node.js was not found. The bundled tools/node/node.exe is missing and no node.exe is available on PATH.");
 
-            string args = $"\"{eslintJs}\" --no-config-lookup --no-ignore --ext .js,.jsx,.ts,.tsx,.mjs,.cjs " +
-                          $"--rule \"{RulesJson}\" --format json .";
+            string config = AppPaths.FindFile("Rules", "eslint.config.mjs") ?? string.Empty;
+            string configArg = string.IsNullOrEmpty(config)
+                ? $"--rule \"{RulesJson}\""
+                : $"--config \"{config}\"";
+
+            string args = $"\"{eslintJs}\" --no-config-lookup {configArg} " +
+                          "--ignore-pattern \"**/node_modules/**\" --ignore-pattern \"**/dist/**\" " +
+                          "--ignore-pattern \"**/build/**\" --ignore-pattern \"**/vendor/**\" " +
+                          "--ignore-pattern \"**/tools/**\" --ignore-pattern \"**/*.min.js\" " +
+                          "--ext .js,.jsx,.ts,.tsx,.mjs,.cjs --format json .";
 
             var psi = new ProcessStartInfo
             {
@@ -113,7 +124,7 @@ namespace KernelSpyScanner.Integrations
                     {
                         int line = msg.TryGetProperty("line", out var l) ? l.GetInt32() : 0;
                         int sevNum = msg.TryGetProperty("severity", out var s) ? s.GetInt32() : 1;
-                        string severity = sevNum >= 2 ? "HIGH" : "MEDIUM";
+                        string severity = sevNum >= 2 ? "HIGH" : "LOW";
                         string ruleId = msg.TryGetProperty("ruleId", out var r) && r.ValueKind != JsonValueKind.Null ? r.GetString() ?? "eslint" : "eslint";
                         string message = msg.TryGetProperty("message", out var m) ? m.GetString() ?? string.Empty : string.Empty;
 
