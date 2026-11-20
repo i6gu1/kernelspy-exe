@@ -49,6 +49,7 @@ namespace KernelSpyScanner.Engine
             var root = Path.GetFullPath(folder);
             var files = SourceFiles.Enumerate(root).Take(MaxFiles).ToList();
             var findings = new List<Finding>();
+            var externalLineCache = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
 
             int total = files.Count;
             int done = 0;
@@ -130,7 +131,7 @@ namespace KernelSpyScanner.Engine
             progress?.Report(new ScanProgress { Percent = 82, Message = "Running ESLint analysis...", FilesDone = done, TotalFiles = total });
             try
             {
-                findings.AddRange(await EslintRunner.RunAsync(root, ct).ConfigureAwait(false));
+                AddExternalFindings(findings, await EslintRunner.RunAsync(root, ct).ConfigureAwait(false), root, externalLineCache);
             }
             catch (Exception ex)
             {
@@ -142,7 +143,7 @@ namespace KernelSpyScanner.Engine
             progress?.Report(new ScanProgress { Percent = 90, Message = "Running Semgrep analysis...", FilesDone = done, TotalFiles = total });
             try
             {
-                findings.AddRange(await SemgrepRunner.RunAsync(root, ct).ConfigureAwait(false));
+                AddExternalFindings(findings, await SemgrepRunner.RunAsync(root, ct).ConfigureAwait(false), root, externalLineCache);
             }
             catch (Exception ex)
             {
@@ -268,6 +269,51 @@ namespace KernelSpyScanner.Engine
             if (index >= 0) return index + 1;
             var next = ~index;
             return Math.Max(1, next);
+        }
+
+        /// <summary>
+        /// External analysers do not know about kernelspy-ignore. Apply the same
+        /// inline suppression rule to their findings before merging.
+        /// </summary>
+        private static void AddExternalFindings(
+            List<Finding> findings,
+            IEnumerable<Finding> external,
+            string root,
+            Dictionary<string, string[]> lineCache)
+        {
+            foreach (var finding in external)
+            {
+                finding.File = NormalizePath(finding.File, root);
+                if (IsInlineSuppressed(finding, lineCache)) continue;
+                findings.Add(finding);
+            }
+        }
+
+        private static bool IsInlineSuppressed(Finding finding, Dictionary<string, string[]> lineCache)
+        {
+            try
+            {
+                if (!lineCache.TryGetValue(finding.File, out var lines))
+                {
+                    if (!File.Exists(finding.File) || new FileInfo(finding.File).Length > MaxFileBytes)
+                        return false;
+                    lines = File.ReadAllLines(finding.File);
+                    lineCache[finding.File] = lines;
+                }
+
+                if (finding.Line >= 1 && finding.Line <= lines.Length &&
+                    lines[finding.Line - 1].Contains("kernelspy-ignore", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                if (finding.Line > 1 && finding.Line - 2 < lines.Length &&
+                    lines[finding.Line - 2].Contains("kernelspy-ignore", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            catch
+            {
+                // An unreadable file cannot be suppressed; keep the finding.
+            }
+            return false;
         }
 
         /// <summary>

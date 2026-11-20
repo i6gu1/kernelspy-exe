@@ -26,6 +26,20 @@ rules:
           - pattern: Process.Start("..." + $X)
           - pattern: eval($X)
 
+  - id: kernelspy-command-injection-variable
+    languages: [python, javascript, typescript, java, csharp, php, ruby, go]
+    message: "Potential OS command injection: command name comes from a variable."
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: subprocess.call($CMD, shell=True)
+          - pattern: Process.Start($CMD)
+          - pattern: exec($CMD)
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: (?i).*(user|input|param|cmd|command|arg).*
+
   - id: kernelspy-xss-dom-sink
     languages: [javascript, typescript]
     message: "Potential DOM XSS: untrusted value written to an HTML sink."

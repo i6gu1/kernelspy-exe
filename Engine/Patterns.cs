@@ -67,6 +67,9 @@ namespace KernelSpyScanner.Engine
             new("Path Traversal", "PATH_TRAVERSAL", "HIGH",
                 @"\b(File\.ReadAllText|File\.ReadAllBytes|File\.OpenRead|open|fopen|readFileSync|fs\.readFile)\s*\([^)\n]*(\.\./|%2e%2e|\$\{[^}\n]*(user|input|param)|\+\s*[A-Za-z_$])", Options, RuleScope.Code),
 
+            new("Path Traversal (user-controlled path)", "PATH_TRAVERSAL", "MEDIUM",
+                @"\bPath\.Combine\s*\([^)\n]*(user|input|param|filename|file)[^)\n]*\)", Options, RuleScope.Code),
+
             // ---- Server-side request forgery --------------------------------
             new("Server-Side Request Forgery (SSRF)", "SSRF", "MEDIUM",
                 @"(?<!\bdef\s)(?<!\bfunction\s)(?<!\bconst\s)(?<!\blet\s)(?<!\bvar\s)\b(fetch|axios\.(?:get|post)|requests\.(?:get|post)|urllib\.request\.urlopen|WebRequest\.Create|HttpClient\.GetAsync|http\.Get)\s*\(\s*[^)\n]*(user|input|param|query|target|url|href|link|addr)", Options, RuleScope.Code),
